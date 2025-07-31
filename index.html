@@ -3,9 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>My Video Stream</title>
+    <title>HLS Video Stream with Offline Capability</title>
     <!-- Tailwind CSS CDN for styling -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- HLS.js Library -->
+    <script src="hls.min.js"></script>
     <!-- Link to external CSS file -->
     <link rel="stylesheet" href="style.css">
 </head>
@@ -13,7 +15,7 @@
 
     <div class="bg-gray-800 rounded-xl shadow-2xl p-6 md:p-8 w-full max-w-2xl flex flex-col items-center border border-indigo-700">
         <h1 class="text-3xl md:text-4xl font-extrabold text-white mb-6 text-center">
-            My Video Stream
+            HLS Video Stream
         </h1>
 
         <div class="w-full mb-6 text-center">
@@ -26,13 +28,27 @@
         <div id="videoPlayerContainer" class="flex flex-col items-center justify-center bg-gray-900 rounded-lg shadow-lg p-4 w-full h-full max-w-xl mx-auto">
             <h3 id="videoTitle" class="text-xl font-semibold text-white mb-4 text-center"></h3>
             <div class="relative w-full aspect-video bg-black rounded-md overflow-hidden">
+                <!-- Loading Overlay -->
                 <div id="videoLoadingOverlay" class="absolute inset-0 flex items-center justify-center bg-black bg-opacity-75 text-white text-lg z-10 hidden">
-                    Loading...
+                    <div class="flex flex-col items-center">
+                        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-white mb-4"></div>
+                        Loading...
+                    </div>
                 </div>
+                
+                <!-- Connection Required Overlay -->
+                <div id="connectionOverlay" class="absolute inset-0 flex items-center justify-center bg-black bg-opacity-90 text-white z-20 hidden">
+                    <div class="flex flex-col items-center text-center p-6">
+                        <div class="animate-spin rounded-full h-16 w-16 border-b-2 border-yellow-400 mb-6"></div>
+                        <h3 class="text-xl font-semibold mb-2">Internet Connection Required</h3>
+                        <p class="text-gray-300 mb-4">The cached segments have finished playing.<br>Please connect to the internet to continue watching.</p>
+                        <div id="connectionStatus" class="text-yellow-400 font-medium">Waiting for connection...</div>
+                    </div>
+                </div>
+
                 <video
                     id="videoElement"
                     controls
-                    autoplay
                     playsinline
                     class="w-full h-full object-contain rounded-md"
                 >
@@ -43,6 +59,10 @@
                 </div>
             </div>
             <p id="videoMessage" class="mt-4 text-gray-300 text-sm text-center"></p>
+            <div id="progressInfo" class="mt-2 text-xs text-gray-400 text-center">
+                <div id="segmentProgress"></div>
+                <div id="cacheInfo"></div>
+            </div>
         </div>
 
         <div class="flex justify-center space-x-4 mt-8 w-full">
@@ -61,9 +81,9 @@
         </div>
 
         <div class="mt-8 w-full">
-            <h2 class="text-2xl font-semibold text-white mb-4 text-center">Cached Videos (Initial Segments)</h2>
-            <div id="cachedVideosList" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <p class="text-gray-400 text-center text-sm">No initial segments cached yet.</p>
+            <h2 class="text-2xl font-semibold text-white mb-4 text-center">Cached Segments</h2>
+            <div id="cachedVideosList" class="grid grid-cols-1 gap-2">
+                <p class="text-gray-400 text-center text-sm">No segments cached yet.</p>
             </div>
             <button
                 id="clearCacheButton"

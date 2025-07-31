@@ -1,16 +1,39 @@
-// Mock video data
-const MOCK_VIDEOS = [
-    { id: 'v1', title: 'Funny Cat Compilation', src: 'https://www.learningcontainer.com/wp-content/uploads/2020/05/sample-mp4-file.mp4' },
-    { id: 'v2', title: 'Amazing Nature Scenes', src: 'https://www.learningcontainer.com/wp-content/uploads/2020/05/sample-mp4-file.mp4' },
-    { id: 'v3', title: 'Tech Gadget Review', src: 'https://www.learningcontainer.com/wp-content/uploads/2020/05/sample-mp4-file.mp4' },
-    { id: 'v4', title: 'Cooking Tutorial', src: 'https://www.learningcontainer.com/wp-content/uploads/2020/05/sample-mp4-file.mp4' },
-    { id: 'v5', title: 'Travel Vlog Highlights', src: 'https://www.learningcontainer.com/wp-content/uploads/2020/05/sample-mp4-file.mp4' },
+// HLS Video Stream Configuration
+const HLS_STREAMS = [
+    { 
+        id: 'stream1', 
+        title: 'Sample HLS Stream 1', 
+        src: 'https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8' 
+    },
+    { 
+        id: 'stream2', 
+        title: 'Apple HLS Demo', 
+        src: 'https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel.ism/.m3u8' 
+    },
+    { 
+        id: 'stream3', 
+        title: 'Big Buck Bunny HLS', 
+        src: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8' 
+    }
 ];
 
+// Configuration
+const CACHE_SEGMENT_COUNT = 3; // Number of segments to cache offline
+const SEGMENT_BUFFER_CHECK_INTERVAL = 1000; // Check every second
+
 // Global state variables
-let currentVideoIndex = 0;
+let currentStreamIndex = 0;
 let isOnline = navigator.onLine;
 let db; // IndexedDB instance
+let hls; // HLS.js instance
+let cachedSegments = new Map(); // Track cached segments for current stream
+let segmentUrls = []; // Current stream's segment URLs
+let isPlayingFromCache = false;
+let currentSegmentIndex = 0;
+let totalCachedDuration = 0;
+let connectionCheckInterval;
+let bufferCheckInterval;
+let pendingTransition = false;
 
 // DOM Elements
 const networkStatusElem = document.getElementById('networkStatus');
@@ -18,9 +41,13 @@ const networkMessageElem = document.getElementById('networkMessage');
 const videoTitleElem = document.getElementById('videoTitle');
 const videoElement = document.getElementById('videoElement');
 const videoLoadingOverlay = document.getElementById('videoLoadingOverlay');
+const connectionOverlay = document.getElementById('connectionOverlay');
+const connectionStatus = document.getElementById('connectionStatus');
 const videoMessageElem = document.getElementById('videoMessage');
 const noVideoSourceElem = document.getElementById('noVideoSource');
 const cachedVideosListElem = document.getElementById('cachedVideosList');
+const segmentProgress = document.getElementById('segmentProgress');
+const cacheInfo = document.getElementById('cacheInfo');
 const prevButton = document.getElementById('prevButton');
 const nextButton = document.getElementById('nextButton');
 const clearCacheButton = document.getElementById('clearCacheButton');
@@ -28,27 +55,30 @@ const clearCacheButton = document.getElementById('clearCacheButton');
 // --- IndexedDB Functions ---
 
 /**
- * Opens the IndexedDB database.
- * @returns {Promise<IDBDatabase>} A promise that resolves with the database instance.
+ * Opens the IndexedDB database for HLS segments.
  */
 function openDatabase() {
     return new Promise((resolve, reject) => {
-        const request = indexedDB.open('VideoCacheDB', 1);
+        const request = indexedDB.open('HLSCacheDB', 1);
 
         request.onupgradeneeded = (event) => {
             const db = event.target.result;
-            // Create an object store to hold video segments
-            if (!db.objectStoreNames.contains('videoSegments')) {
-                db.createObjectStore('videoSegments', { keyPath: 'id' });
-                console.log('IndexedDB object store created/upgraded.');
+            
+            // Create stores for segments and manifests
+            if (!db.objectStoreNames.contains('segments')) {
+                db.createObjectStore('segments', { keyPath: 'id' });
             }
-            // No explicit resolve here. onsuccess will handle it after the upgrade transaction commits.
+            if (!db.objectStoreNames.contains('manifests')) {
+                db.createObjectStore('manifests', { keyPath: 'id' });
+            }
+            
+            console.log('IndexedDB stores created/upgraded.');
         };
 
         request.onsuccess = (event) => {
-            db = event.target.result; // Assign to global db variable
+            db = event.target.result;
             console.log('IndexedDB opened successfully.');
-            resolve(db); // Always resolve the promise here
+            resolve(db);
         };
 
         request.onerror = (event) => {
@@ -59,439 +89,735 @@ function openDatabase() {
 }
 
 /**
- * Stores a video segment (ArrayBuffer) in IndexedDB.
- * @param {string} videoId - The ID of the video.
- * @param {ArrayBuffer} data - The video segment data as an ArrayBuffer.
- * @returns {Promise<void>}
+ * Stores a segment in IndexedDB.
  */
-function storeSegmentInIndexedDB(videoId, data) {
+function storeSegment(streamId, segmentIndex, data) {
     return new Promise((resolve, reject) => {
-        if (!db) {
-            console.error('IndexedDB not initialized when trying to store segment.');
-            return reject('IndexedDB not initialized.');
-        }
-        const transaction = db.transaction(['videoSegments'], 'readwrite');
-        const store = transaction.objectStore('videoSegments');
-        const request = store.put({ id: videoId, data: data });
+        if (!db) return reject('IndexedDB not initialized.');
+        
+        const transaction = db.transaction(['segments'], 'readwrite');
+        const store = transaction.objectStore('segments');
+        const id = `${streamId}_segment_${segmentIndex}`;
+        
+        const request = store.put({ 
+            id: id, 
+            streamId: streamId,
+            segmentIndex: segmentIndex,
+            data: data,
+            timestamp: Date.now()
+        });
 
         request.onsuccess = () => {
-            console.log(`Video segment ${videoId} stored in IndexedDB.`);
+            console.log(`Segment ${segmentIndex} for stream ${streamId} stored.`);
             resolve();
         };
 
         request.onerror = (event) => {
-            console.error(`Error storing segment ${videoId} in IndexedDB:`, event.target.error);
+            console.error(`Error storing segment:`, event.target.error);
             reject(event.target.error);
         };
     });
 }
 
 /**
- * Retrieves a video segment (ArrayBuffer) from IndexedDB.
- * @param {string} videoId - The ID of the video.
- * @returns {Promise<ArrayBuffer|null>} A promise that resolves with the ArrayBuffer data or null if not found.
+ * Retrieves a segment from IndexedDB.
  */
-function getSegmentFromIndexedDB(videoId) {
+function getSegment(streamId, segmentIndex) {
     return new Promise((resolve, reject) => {
-        if (!db) {
-            console.error('IndexedDB not initialized when trying to get segment.');
-            return resolve(null); // Resolve with null if DB not ready, as it means not cached
-        }
-        const transaction = db.transaction(['videoSegments'], 'readonly');
-        const store = transaction.objectStore('videoSegments');
-        const request = store.get(videoId);
+        if (!db) return resolve(null);
+        
+        const transaction = db.transaction(['segments'], 'readonly');
+        const store = transaction.objectStore('segments');
+        const id = `${streamId}_segment_${segmentIndex}`;
+        const request = store.get(id);
 
         request.onsuccess = () => {
             if (request.result) {
-                console.log(`Video segment ${videoId} retrieved from IndexedDB.`);
                 resolve(request.result.data);
             } else {
-                console.log(`Video segment ${videoId} not found in IndexedDB.`);
                 resolve(null);
             }
         };
 
         request.onerror = (event) => {
-            console.error(`Error retrieving segment ${videoId} from IndexedDB:`, event.target.error);
+            console.error(`Error retrieving segment:`, event.target.error);
             reject(event.target.error);
         };
     });
 }
 
 /**
- * Deletes a video segment from IndexedDB.
- * @param {string} videoId - The ID of the video to delete.
- * @returns {Promise<void>}
+ * Get all cached segments for a stream.
  */
-function deleteSegmentFromIndexedDB(videoId) {
+function getCachedSegmentsForStream(streamId) {
     return new Promise((resolve, reject) => {
-        if (!db) {
-            console.error('IndexedDB not initialized when trying to delete segment.');
-            return reject('IndexedDB not initialized.');
-        }
-        const transaction = db.transaction(['videoSegments'], 'readwrite');
-        const store = transaction.objectStore('videoSegments');
-        const request = store.delete(videoId);
+        if (!db) return resolve([]);
+        
+        const transaction = db.transaction(['segments'], 'readonly');
+        const store = transaction.objectStore('segments');
+        const request = store.getAll();
 
         request.onsuccess = () => {
-            console.log(`Video segment ${videoId} deleted from IndexedDB.`);
+            const allSegments = request.result || [];
+            const streamSegments = allSegments
+                .filter(segment => segment.streamId === streamId)
+                .sort((a, b) => a.segmentIndex - b.segmentIndex);
+            resolve(streamSegments);
+        };
+
+        request.onerror = (event) => {
+            reject(event.target.error);
+        };
+    });
+}
+
+/**
+ * Clear all cached data.
+ */
+function clearAllCache() {
+    return new Promise((resolve, reject) => {
+        if (!db) return reject('IndexedDB not initialized.');
+        
+        const transaction = db.transaction(['segments', 'manifests'], 'readwrite');
+        const segmentStore = transaction.objectStore('segments');
+        const manifestStore = transaction.objectStore('manifests');
+        
+        const clearSegments = segmentStore.clear();
+        const clearManifests = manifestStore.clear();
+        
+        Promise.all([
+            new Promise(res => { clearSegments.onsuccess = () => res(); }),
+            new Promise(res => { clearManifests.onsuccess = () => res(); })
+        ]).then(() => {
+            console.log('All cache cleared.');
             resolve();
-        };
-
-        request.onerror = (event) => {
-            console.error(`Error deleting segment ${videoId} from IndexedDB:`, event.target.error);
-            reject(event.target.error);
-        };
+        }).catch(reject);
     });
 }
 
+// --- HLS Processing Functions ---
+
 /**
- * Clears all video segments from IndexedDB.
- * @returns {Promise<void>}
+ * Fetches and parses HLS manifest to extract segment URLs.
  */
-function clearAllSegmentsFromIndexedDB() {
-    return new Promise((resolve, reject) => {
-        if (!db) {
-            console.error('IndexedDB not initialized when trying to clear all segments.');
-            return reject('IndexedDB not initialized.');
+async function parseHLSManifest(manifestUrl) {
+    try {
+        const response = await fetch(manifestUrl);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        
+        const manifestText = await response.text();
+        const lines = manifestText.split('\n');
+        const segments = [];
+        
+        let segmentDuration = 0;
+        const baseUrl = manifestUrl.substring(0, manifestUrl.lastIndexOf('/') + 1);
+        
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            
+            if (line.startsWith('#EXTINF:')) {
+                // Extract duration
+                const durationMatch = line.match(/#EXTINF:([\d.]+)/);
+                if (durationMatch) {
+                    segmentDuration = parseFloat(durationMatch[1]);
+                }
+            } else if (line && !line.startsWith('#')) {
+                // This is a segment URL
+                const segmentUrl = line.startsWith('http') ? line : baseUrl + line;
+                segments.push({
+                    url: segmentUrl,
+                    duration: segmentDuration
+                });
+            }
         }
-        const transaction = db.transaction(['videoSegments'], 'readwrite');
-        const store = transaction.objectStore('videoSegments');
-        const request = store.clear();
-
-        request.onsuccess = () => {
-            console.log('All video segments cleared from IndexedDB.');
-            resolve();
-        };
-
-        request.onerror = (event) => {
-            console.error('Error clearing IndexedDB:', event.target.error);
-            reject(event.target.error);
-        };
-    });
+        
+        return segments;
+    } catch (error) {
+        console.error('Error parsing HLS manifest:', error);
+        return [];
+    }
 }
 
 /**
- * Retrieves all video IDs from IndexedDB.
- * @returns {Promise<string[]>} A promise that resolves with an array of video IDs.
+ * Downloads and caches the first N segments.
  */
-function getAllCachedVideoIds() {
-    return new Promise((resolve, reject) => {
-        if (!db) {
-            console.error('IndexedDB not initialized when trying to get all cached IDs.');
-            return resolve([]); // Resolve with empty array if DB not ready
+async function cacheInitialSegments(streamId, segments) {
+    const segmentsToCache = segments.slice(0, CACHE_SEGMENT_COUNT);
+    cachedSegments.clear();
+    totalCachedDuration = 0;
+    
+    for (let i = 0; i < segmentsToCache.length; i++) {
+        const segment = segmentsToCache[i];
+        
+        try {
+            // Check if already cached
+            const cached = await getSegment(streamId, i);
+            if (cached) {
+                cachedSegments.set(i, segment.url);
+                totalCachedDuration += segment.duration;
+                console.log(`Segment ${i} already cached`);
+                continue;
+            }
+            
+            if (!isOnline) break; // Can't download if offline
+            
+            console.log(`Downloading segment ${i}...`);
+            const response = await fetch(segment.url);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            
+            const data = await response.arrayBuffer();
+            await storeSegment(streamId, i, data);
+            cachedSegments.set(i, segment.url);
+            totalCachedDuration += segment.duration;
+            
+            updateCacheInfo();
+            
+        } catch (error) {
+            console.error(`Error caching segment ${i}:`, error);
+            break;
         }
-        const transaction = db.transaction(['videoSegments'], 'readonly');
-        const store = transaction.objectStore('videoSegments');
-        const request = store.getAllKeys();
-
-        request.onsuccess = () => {
-            resolve(request.result);
-        };
-
-        request.onerror = (event) => {
-            console.error('Error getting all keys from IndexedDB:', event.target.error);
-            reject(event.target.error);
-        };
-    });
+    }
+    
+    console.log(`Cached ${cachedSegments.size} segments (${totalCachedDuration.toFixed(1)}s)`);
+    updateCachedVideosList();
 }
 
-// --- Core Application Logic ---
+// --- Video Player Functions ---
 
 /**
- * Updates the network status display.
+ * Creates a Blob URL from cached segment data.
  */
-function updateNetworkStatusDisplay() {
+async function createBlobFromCachedSegments(streamId) {
+    const segments = [];
+    
+    for (let i = 0; i < CACHE_SEGMENT_COUNT; i++) {
+        const data = await getSegment(streamId, i);
+        if (data) {
+            segments.push(data);
+        } else {
+            break;
+        }
+    }
+    
+    if (segments.length === 0) return null;
+    
+    // Combine all segment data
+    const totalLength = segments.reduce((sum, data) => sum + data.byteLength, 0);
+    const combined = new Uint8Array(totalLength);
+    let offset = 0;
+    
+    for (const data of segments) {
+        combined.set(new Uint8Array(data), offset);
+        offset += data.byteLength;
+    }
+    
+    return URL.createObjectURL(new Blob([combined], { type: 'video/mp2t' }));
+}
+
+/**
+ * Initializes HLS.js player.
+ */
+function initializeHLS() {
+    if (hls) {
+        hls.destroy();
+    }
+    
+    if (Hls.isSupported()) {
+        hls = new Hls({
+            debug: false,
+            enableWorker: true,
+            lowLatencyMode: false,
+            backBufferLength: 90
+        });
+        
+        hls.attachMedia(videoElement);
+        
+        hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+            console.log('HLS media attached');
+        });
+        
+        hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+            console.log('HLS manifest parsed, levels:', data.levels.length);
+        });
+        
+        hls.on(Hls.Events.ERROR, (event, data) => {
+            console.error('HLS error:', data);
+            if (data.fatal) {
+                handleHLSError(data);
+            }
+        });
+        
+        hls.on(Hls.Events.FRAG_LOADED, (event, data) => {
+            // Track loaded fragments
+            updateSegmentProgress();
+        });
+        
+    } else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+        // Native HLS support (Safari)
+        console.log('Using native HLS support');
+    } else {
+        console.error('HLS not supported');
+        videoMessageElem.textContent = 'HLS playback not supported in this browser.';
+    }
+}
+
+/**
+ * Handles HLS errors.
+ */
+function handleHLSError(data) {
+    switch (data.type) {
+        case Hls.ErrorTypes.NETWORK_ERROR:
+            if (!isOnline) {
+                showConnectionRequired();
+            } else {
+                console.log('Network error, attempting recovery...');
+                hls.startLoad();
+            }
+            break;
+        case Hls.ErrorTypes.MEDIA_ERROR:
+            console.log('Media error, attempting recovery...');
+            hls.recoverMediaError();
+            break;
+        default:
+            console.error('Fatal HLS error, destroying player');
+            hls.destroy();
+            break;
+    }
+}
+
+/**
+ * Loads and plays the current stream.
+ */
+async function loadCurrentStream() {
+    const stream = HLS_STREAMS[currentStreamIndex];
+    if (!stream) return;
+    
+    showLoading(true);
+    videoTitleElem.textContent = stream.title;
+    
+    // Parse manifest to get segment information
+    if (isOnline) {
+        segmentUrls = await parseHLSManifest(stream.src);
+        if (segmentUrls.length > 0) {
+            await cacheInitialSegments(stream.id, segmentUrls);
+        }
+    }
+    
+    // Check if we have cached segments
+    const cachedSegmentData = await getCachedSegmentsForStream(stream.id);
+    const hasCachedSegments = cachedSegmentData.length > 0;
+    
+    if (hasCachedSegments && !isOnline) {
+        // Play from cache only (offline)
+        await playFromCache(stream.id);
+    } else if (hasCachedSegments && isOnline) {
+        // Start from cache then transition to live
+        await playFromCacheWithTransition(stream);
+    } else if (isOnline) {
+        // Play live directly
+        await playLiveStream(stream);
+    } else {
+        // No cache and offline
+        showOfflineMessage();
+    }
+    
+    showLoading(false);
+}
+
+/**
+ * Plays video from cached segments only.
+ */
+async function playFromCache(streamId) {
+    try {
+        const blobUrl = await createBlobFromCachedSegments(streamId);
+        if (blobUrl) {
+            videoElement.src = blobUrl;
+            isPlayingFromCache = true;
+            videoMessageElem.textContent = `Playing from cache (${totalCachedDuration.toFixed(1)}s cached)`;
+            
+            // Set up monitoring for when cached content ends
+            startBufferMonitoring();
+            videoElement.play();
+        } else {
+            showOfflineMessage();
+        }
+    } catch (error) {
+        console.error('Error playing from cache:', error);
+        showOfflineMessage();
+    }
+}
+
+/**
+ * Plays from cache initially, then transitions to live stream.
+ */
+async function playFromCacheWithTransition(stream) {
+    try {
+        // Start with cached segments
+        await playFromCache(stream.id);
+        
+        // Prepare live stream in background
+        initializeHLS();
+        if (hls) {
+            hls.loadSource(stream.src);
+        } else {
+            // Native HLS support
+            const liveVideo = document.createElement('video');
+            liveVideo.src = stream.src;
+        }
+        
+        // Monitor for transition point
+        startTransitionMonitoring(stream);
+        
+    } catch (error) {
+        console.error('Error in cache-to-live transition:', error);
+        // Fallback to live stream
+        await playLiveStream(stream);
+    }
+}
+
+/**
+ * Plays live HLS stream directly.
+ */
+async function playLiveStream(stream) {
+    try {
+        initializeHLS();
+        
+        if (hls) {
+            hls.loadSource(stream.src);
+            videoMessageElem.textContent = 'Streaming live...';
+        } else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+            videoElement.src = stream.src;
+            videoMessageElem.textContent = 'Streaming live (native HLS)...';
+        }
+        
+        isPlayingFromCache = false;
+        videoElement.play();
+        
+    } catch (error) {
+        console.error('Error playing live stream:', error);
+        videoMessageElem.textContent = 'Error loading stream.';
+    }
+}
+
+/**
+ * Monitors buffer for transition from cache to live.
+ */
+function startTransitionMonitoring(stream) {
+    if (bufferCheckInterval) clearInterval(bufferCheckInterval);
+    
+    bufferCheckInterval = setInterval(() => {
+        if (!isPlayingFromCache || pendingTransition) return;
+        
+        const currentTime = videoElement.currentTime;
+        const buffered = videoElement.buffered;
+        
+        if (buffered.length > 0) {
+            const bufferedEnd = buffered.end(buffered.length - 1);
+            const remainingBuffer = bufferedEnd - currentTime;
+            
+            // Transition when we're close to the end of cached content
+            if (remainingBuffer <= 2 && isOnline) {
+                transitionToLiveStream(stream);
+            } else if (remainingBuffer <= 0.5 && !isOnline) {
+                showConnectionRequired();
+            }
+        }
+    }, 500);
+}
+
+/**
+ * Transitions from cached playback to live stream.
+ */
+async function transitionToLiveStream(stream) {
+    if (pendingTransition) return;
+    pendingTransition = true;
+    
+    try {
+        console.log('Transitioning to live stream...');
+        const currentTime = videoElement.currentTime;
+        
+        // Initialize HLS for live stream
+        initializeHLS();
+        
+        if (hls) {
+            // Calculate the live position based on cached duration
+            hls.loadSource(stream.src);
+            
+            hls.once(Hls.Events.MANIFEST_PARSED, () => {
+                // Start live stream from appropriate position
+                const targetTime = currentTime; // Approximate position
+                hls.startLoad(targetTime);
+                
+                videoElement.currentTime = targetTime;
+                videoElement.play();
+                
+                isPlayingFromCache = false;
+                videoMessageElem.textContent = 'Transitioned to live stream';
+                
+                clearInterval(bufferCheckInterval);
+            });
+        }
+    } catch (error) {
+        console.error('Error transitioning to live stream:', error);
+    } finally {
+        pendingTransition = false;
+    }
+}
+
+/**
+ * Starts monitoring buffer status.
+ */
+function startBufferMonitoring() {
+    if (bufferCheckInterval) clearInterval(bufferCheckInterval);
+    
+    bufferCheckInterval = setInterval(() => {
+        updateSegmentProgress();
+        
+        if (isPlayingFromCache && !isOnline) {
+            const currentTime = videoElement.currentTime;
+            const buffered = videoElement.buffered;
+            
+            if (buffered.length > 0) {
+                const bufferedEnd = buffered.end(buffered.length - 1);
+                const remainingBuffer = bufferedEnd - currentTime;
+                
+                if (remainingBuffer <= 1) {
+                    showConnectionRequired();
+                }
+            }
+        }
+    }, 1000);
+}
+
+/**
+ * Shows the connection required overlay.
+ */
+function showConnectionRequired() {
+    connectionOverlay.classList.remove('hidden');
+    videoElement.pause();
+    
+    // Start checking for connection
+    if (connectionCheckInterval) clearInterval(connectionCheckInterval);
+    
+    connectionCheckInterval = setInterval(() => {
+        if (isOnline) {
+            hideConnectionRequired();
+            // Resume or transition to live stream
+            const stream = HLS_STREAMS[currentStreamIndex];
+            if (stream) {
+                playLiveStream(stream);
+            }
+        }
+    }, 1000);
+}
+
+/**
+ * Hides the connection required overlay.
+ */
+function hideConnectionRequired() {
+    connectionOverlay.classList.add('hidden');
+    if (connectionCheckInterval) {
+        clearInterval(connectionCheckInterval);
+        connectionCheckInterval = null;
+    }
+}
+
+/**
+ * Shows/hides loading overlay.
+ */
+function showLoading(show) {
+    if (show) {
+        videoLoadingOverlay.classList.remove('hidden');
+    } else {
+        videoLoadingOverlay.classList.add('hidden');
+    }
+}
+
+/**
+ * Shows offline message.
+ */
+function showOfflineMessage() {
+    videoMessageElem.textContent = 'No cached content available. Please connect to the internet.';
+    noVideoSourceElem.classList.remove('hidden');
+    videoElement.classList.add('hidden');
+}
+
+// --- UI Update Functions ---
+
+/**
+ * Updates network status display.
+ */
+function updateNetworkStatus() {
     networkStatusElem.textContent = `Network Status: ${isOnline ? 'Online' : 'Offline'}`;
     networkStatusElem.classList.toggle('text-green-400', isOnline);
     networkStatusElem.classList.toggle('text-red-400', !isOnline);
-}
-
-/**
- * Simulates fetching a small initial chunk of a video and stores it in IndexedDB.
- * @param {object} video - The video object to pre-load.
- * @returns {Promise<string|null>} A Promise that resolves with the Blob URL or null if failed.
- */
-async function preloadInitialSegment(video) {
-    // Check IndexedDB first
-    const cachedData = await getSegmentFromIndexedDB(video.id);
-    if (cachedData) {
-        console.log(`Video ${video.id} initial segment found in IndexedDB.`);
-        return URL.createObjectURL(new Blob([cachedData], { type: 'video/mp4' }));
-    }
-
-    if (!isOnline) {
-        console.log(`Cannot pre-load ${video.id}: Offline.`);
-        return null;
-    }
-
-    console.log(`Pre-loading initial segment for video: ${video.id}`);
-    try {
-        const response = await fetch(video.src, {
-            headers: {
-                'Range': 'bytes=0-102400' // Fetch first 100KB as a "segment"
-            }
-        });
-
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
-        const blob = await response.blob();
-        const arrayBuffer = await blob.arrayBuffer(); // Convert Blob to ArrayBuffer for IndexedDB
-        await storeSegmentInIndexedDB(video.id, arrayBuffer); // Store in IndexedDB
-
-        const blobUrl = URL.createObjectURL(blob);
-        console.log(`Pre-loaded ${video.id} initial segment into cache.`);
-        updateCachedVideosList(); // Update the UI list
-        return blobUrl;
-    } catch (error) {
-        console.error(`Error pre-loading initial segment for ${video.id}:`, error);
-        return null;
-    }
-}
-
-/**
- * Fetches the full video.
- * @param {object} video - The video object to fetch.
- * @returns {Promise<string|null>} A Promise that resolves with the Blob URL or null if failed.
- */
-async function fetchFullVideo(video) {
-    if (!isOnline) {
-        console.log(`Cannot fetch full video ${video.id}: Offline.`);
-        return null;
-    }
-
-    console.log(`Fetching full video: ${video.id}`);
-    try {
-        const response = await fetch(video.src);
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        const blob = await response.blob();
-        return URL.createObjectURL(blob);
-    } catch (error) {
-        console.error(`Error fetching full video ${video.id}:`, error);
-        return null;
-    }
-}
-
-/**
- * Loads and plays the current video.
- * Handles cached segments and full streaming based on network status.
- */
-async function loadVideoPlayer() {
-    const video = MOCK_VIDEOS[currentVideoIndex];
-    if (!video) {
-        videoTitleElem.textContent = 'No Video';
-        videoElement.src = '';
-        videoElement.classList.add('hidden');
-        noVideoSourceElem.classList.remove('hidden');
-        videoMessageElem.textContent = 'No videos to display.';
-        return;
-    }
-
-    videoTitleElem.textContent = video.title;
-    videoMessageElem.textContent = '';
-    videoLoadingOverlay.classList.remove('hidden');
-    noVideoSourceElem.classList.add('hidden');
-    videoElement.classList.remove('hidden');
-    videoElement.pause(); // Pause current video before changing source
-
-    // Try to play from IndexedDB cache first
-    const cachedData = await getSegmentFromIndexedDB(video.id);
-    if (cachedData) {
-        const cachedUrl = URL.createObjectURL(new Blob([cachedData], { type: 'video/mp4' }));
-        console.log(`Playing initial segment of ${video.id} from IndexedDB cache.`);
-        videoElement.src = cachedUrl;
-        videoElement.load();
-        videoElement.play();
-        videoMessageElem.textContent = 'Playing from cache (initial segment)...';
-
-        // If online, immediately try to fetch the rest of the video
-        if (isOnline) {
-            try {
-                const fullVideoUrl = await fetchFullVideo(video);
-                if (fullVideoUrl) {
-                    // Revoke the temporary Blob URL for the initial segment to free memory
-                    URL.revokeObjectURL(cachedUrl);
-                    // Replace the source with the full video once loaded
-                    videoElement.src = fullVideoUrl;
-                    videoElement.load(); // Reload the video element to pick up new source
-                    videoElement.play(); // Continue playing
-                    videoMessageElem.textContent = 'Streaming full video...';
-                    // Optionally, delete the initial segment from IndexedDB if the full video is now streaming
-                    // await deleteSegmentFromIndexedDB(video.id);
-                    // updateCachedVideosList();
-                }
-            } catch (error) {
-                console.error("Failed to load full video after cached segment:", error);
-                videoMessageElem.textContent = 'Error streaming full video, playing cached segment only.';
-            }
-        } else {
-            videoMessageElem.textContent = 'Offline: Playing initial segment from cache only.';
-        }
-    } else if (isOnline) {
-        // If not in cache but online, fetch the full video directly
-        console.log(`Fetching full video ${video.id} (not in cache).`);
-        videoMessageElem.textContent = 'Fetching full video...';
-        try {
-            const fullVideoUrl = await fetchFullVideo(video);
-            if (fullVideoUrl) {
-                videoElement.src = fullVideoUrl;
-                videoElement.load();
-                videoElement.play();
-                videoMessageElem.textContent = 'Streaming full video...';
-            } else {
-                videoMessageElem.textContent = 'Failed to load video. Check network.';
-                handlePlaybackError(video.id, 'Failed to load full video.');
-            }
-        } catch (error) {
-            videoMessageElem.textContent = 'Failed to load video. Check network.';
-            handlePlaybackError(video.id, 'Failed to load full video.');
-        }
+    
+    if (isOnline) {
+        hideConnectionRequired();
+        connectionStatus.textContent = 'Connected!';
     } else {
-        // Not in cache and offline
-        videoMessageElem.textContent = 'Offline and video not cached. Cannot play.';
-        handlePlaybackError(video.id, 'Video not available offline.');
-        videoElement.src = ''; // Clear source if cannot play
+        connectionStatus.textContent = 'Waiting for connection...';
     }
-    videoLoadingOverlay.classList.add('hidden');
 }
 
 /**
- * Handles video ending - moves to the next video.
+ * Updates segment progress information.
  */
-function handleVideoEnd() {
-    console.log(`Video ${MOCK_VIDEOS[currentVideoIndex].id} ended.`);
-    goToNextVideo();
+function updateSegmentProgress() {
+    if (!videoElement.buffered.length) return;
+    
+    const currentTime = videoElement.currentTime;
+    const buffered = videoElement.buffered;
+    const duration = videoElement.duration;
+    
+    if (buffered.length > 0 && duration) {
+        const bufferedEnd = buffered.end(buffered.length - 1);
+        const bufferedPercent = (bufferedEnd / duration * 100).toFixed(1);
+        const currentPercent = (currentTime / duration * 100).toFixed(1);
+        
+        segmentProgress.textContent = `Progress: ${currentPercent}% | Buffered: ${bufferedPercent}%`;
+    }
 }
 
 /**
- * Handles video playback errors.
- * @param {string} videoId - The ID of the video that had an error.
- * @param {string} errorMsg - The error message.
+ * Updates cache information display.
  */
-function handlePlaybackError(videoId, errorMsg) {
-    console.warn(`Playback error for ${videoId}: ${errorMsg}. Attempting to skip.`);
-    // For now, just skip to the next video
-    goToNextVideo();
+function updateCacheInfo() {
+    const stream = HLS_STREAMS[currentStreamIndex];
+    if (stream && cachedSegments.size > 0) {
+        cacheInfo.textContent = `Cached: ${cachedSegments.size} segments (${totalCachedDuration.toFixed(1)}s)`;
+    } else {
+        cacheInfo.textContent = 'No segments cached';
+    }
 }
 
 /**
- * Navigates to the next video in the list.
- */
-function goToNextVideo() {
-    currentVideoIndex = (currentVideoIndex + 1) % MOCK_VIDEOS.length;
-    loadVideoPlayer();
-}
-
-/**
- * Navigates to the previous video in the list.
- */
-function goToPreviousVideo() {
-    currentVideoIndex = (currentVideoIndex - 1 + MOCK_VIDEOS.length) % MOCK_VIDEOS.length;
-    loadVideoPlayer();
-}
-
-/**
- * Updates the list of cached videos displayed in the UI by reading from IndexedDB.
+ * Updates the cached videos list display.
  */
 async function updateCachedVideosList() {
-    cachedVideosListElem.innerHTML = ''; // Clear existing list
-    const cachedIds = await getAllCachedVideoIds();
-
-    if (cachedIds.length === 0) {
-        cachedVideosListElem.innerHTML = '<p class="text-gray-400 text-center text-sm">No initial segments cached yet.</p>';
-    } else {
-        cachedIds.forEach(videoId => {
-            const video = MOCK_VIDEOS.find(v => v.id === videoId);
+    cachedVideosListElem.innerHTML = '';
+    
+    let hasCachedContent = false;
+    
+    for (const stream of HLS_STREAMS) {
+        const segments = await getCachedSegmentsForStream(stream.id);
+        if (segments.length > 0) {
+            hasCachedContent = true;
             const div = document.createElement('div');
-            div.className = 'bg-gray-700 p-3 rounded-lg flex items-center justify-between shadow-md';
+            div.className = 'bg-gray-700 p-3 rounded-lg flex items-center justify-between';
             div.innerHTML = `
-                <span class="text-gray-200 text-sm">
-                    ${video ? video.title : `Video ${videoId}`}
-                </span>
-                <span class="text-green-400 text-xs font-semibold">CACHED</span>
+                <span class="text-gray-200 text-sm">${stream.title}</span>
+                <span class="text-green-400 text-xs">${segments.length} segments</span>
             `;
             cachedVideosListElem.appendChild(div);
-        });
+        }
+    }
+    
+    if (!hasCachedContent) {
+        cachedVideosListElem.innerHTML = '<p class="text-gray-400 text-center text-sm">No segments cached yet.</p>';
     }
 }
 
+// --- Navigation Functions ---
+
 /**
- * Clears all cached video segments from IndexedDB.
+ * Goes to the next stream.
+ */
+function goToNextStream() {
+    currentStreamIndex = (currentStreamIndex + 1) % HLS_STREAMS.length;
+    loadCurrentStream();
+}
+
+/**
+ * Goes to the previous stream.
+ */
+function goToPreviousStream() {
+    currentStreamIndex = (currentStreamIndex - 1 + HLS_STREAMS.length) % HLS_STREAMS.length;
+    loadCurrentStream();
+}
+
+/**
+ * Clears all cached content.
  */
 async function clearCache() {
-    // Revoke any currently active Blob URLs from the cache to free memory
-    // (This part is tricky if videos are currently playing, but for a full clear, it's generally safe)
-    // For a more robust solution, track active Blob URLs and revoke them when no longer needed.
-    await clearAllSegmentsFromIndexedDB();
-    networkMessageElem.textContent = 'Cache cleared!';
-    console.log('Video cache cleared.');
-    updateCachedVideosList(); // Update the UI list
-}
-
-/**
- * Simulates initial pre-loading of the first 2-5 videos' initial segments.
- * This function is now defined globally.
- */
-async function initialPreload() {
-    networkMessageElem.textContent = 'Pre-loading initial video segments...';
-    const videosToPreload = MOCK_VIDEOS.slice(0, Math.min(MOCK_VIDEOS.length, 5)); // Pre-load first 5 videos
-    for (const video of videosToPreload) {
-        await preloadInitialSegment(video);
-    }
-    networkMessageElem.textContent = '';
-    loadVideoPlayer(); // Load the first video after pre-loading
-}
-
-
-// --- Event Listeners and Initial Setup ---
-document.addEventListener('DOMContentLoaded', async () => {
-    // Open IndexedDB first
     try {
-        // Wait for the database to be fully open and any upgrade transaction to complete.
+        await clearAllCache();
+        cachedSegments.clear();
+        totalCachedDuration = 0;
+        updateCachedVideosList();
+        updateCacheInfo();
+        networkMessageElem.textContent = 'Cache cleared successfully!';
+        setTimeout(() => {
+            networkMessageElem.textContent = '';
+        }, 3000);
+    } catch (error) {
+        console.error('Error clearing cache:', error);
+        networkMessageElem.textContent = 'Error clearing cache.';
+    }
+}
+
+// --- Event Listeners and Initialization ---
+
+document.addEventListener('DOMContentLoaded', async () => {
+    try {
+        // Initialize IndexedDB
         await openDatabase();
-        updateNetworkStatusDisplay();
-
-        // Now that `db` is guaranteed to be ready and object stores are committed,
-        // we can safely proceed with IndexedDB operations.
-        if (isOnline) {
-            await initialPreload(); // This will also call loadVideoPlayer internally
-        } else {
-            networkMessageElem.textContent = 'Currently offline. Attempting to play from cache.';
-            await loadVideoPlayer(); // Load the first video, relying on cache if offline
-        }
-        // Update the UI list after initial operations are done and object store is guaranteed to be ready
+        updateNetworkStatus();
+        
+        // Load initial stream
+        await loadCurrentStream();
         await updateCachedVideosList();
-
-        // Add event listeners for network status changes
-        window.addEventListener('online', async () => { // Make async to await initialPreload
+        
+        // Network status listeners
+        window.addEventListener('online', () => {
             isOnline = true;
-            updateNetworkStatusDisplay();
-            networkMessageElem.textContent = 'You are online! Re-pre-loading...';
-            await initialPreload(); // Re-run initial preload logic
-            await updateCachedVideosList(); // Update list after re-preloading
+            updateNetworkStatus();
+            networkMessageElem.textContent = 'Connection restored!';
+            
+            // If we were showing connection required, try to resume
+            if (!connectionOverlay.classList.contains('hidden')) {
+                const stream = HLS_STREAMS[currentStreamIndex];
+                if (stream) {
+                    playLiveStream(stream);
+                }
+            }
         });
-
+        
         window.addEventListener('offline', () => {
             isOnline = false;
-            updateNetworkStatusDisplay();
-            networkMessageElem.textContent = 'You are offline!';
+            updateNetworkStatus();
+            networkMessageElem.textContent = 'Connection lost. Playing from cache if available.';
         });
-
-        // Add event listeners for video player
-        videoElement.addEventListener('ended', handleVideoEnd);
-        videoElement.addEventListener('error', (e) => handlePlaybackError(MOCK_VIDEOS[currentVideoIndex].id, e.target.error ? e.target.error.message : 'Unknown error'));
-
-        // Add event listeners for navigation buttons
-        prevButton.addEventListener('click', goToPreviousVideo);
-        nextButton.addEventListener('click', goToNextVideo);
+        
+        // Video event listeners
+        videoElement.addEventListener('timeupdate', updateSegmentProgress);
+        videoElement.addEventListener('error', (e) => {
+            console.error('Video error:', e);
+            if (!isOnline) {
+                showConnectionRequired();
+            }
+        });
+        
+        // Button listeners
+        prevButton.addEventListener('click', goToPreviousStream);
+        nextButton.addEventListener('click', goToNextStream);
         clearCacheButton.addEventListener('click', clearCache);
-
+        
     } catch (error) {
-        console.error("Failed to initialize application:", error);
-        networkMessageElem.textContent = `Application error: ${error}. Check console.`;
+        console.error('Initialization error:', error);
+        networkMessageElem.textContent = 'Application initialization failed.';
+    }
+});
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', () => {
+    if (hls) {
+        hls.destroy();
+    }
+    if (bufferCheckInterval) {
+        clearInterval(bufferCheckInterval);
+    }
+    if (connectionCheckInterval) {
+        clearInterval(connectionCheckInterval);
     }
 });
