@@ -2,161 +2,128 @@
 const HLS_STREAMS = [
     { 
         id: 'stream1', 
-        title: 'Sample HLS Stream 1', 
+        title: 'Sample HLS Stream', 
+        description: 'High quality video streaming with offline support',
         src: 'https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8' 
     },
     { 
         id: 'stream2', 
-        title: 'Apple HLS Demo', 
+        title: 'Demo Video Stream', 
+        description: 'Professional content delivery',
         src: 'https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel.ism/.m3u8' 
     },
     { 
         id: 'stream3', 
-        title: 'Big Buck Bunny HLS', 
+        title: 'Sample Content', 
+        description: 'Smooth streaming experience',
         src: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8' 
     }
 ];
 
 // Configuration
-const CACHE_SEGMENT_COUNT = 3; // Number of segments to cache offline
-const SEGMENT_BUFFER_CHECK_INTERVAL = 1000; // Check every second
+const MAX_CACHE_DURATION = 15; // Maximum 15 seconds of cached content
+const SEGMENT_CHECK_INTERVAL = 500; // Check every 500ms
 
-// Global state variables
-let currentStreamIndex = 0;
+// Global state
+let currentVideoIndex = 0;
 let isOnline = navigator.onLine;
 let db; // IndexedDB instance
-let hls; // HLS.js instance
-let cachedSegments = new Map(); // Track cached segments for current stream
-let segmentUrls = []; // Current stream's segment URLs
-let isPlayingFromCache = false;
-let currentSegmentIndex = 0;
-let totalCachedDuration = 0;
-let connectionCheckInterval;
-let bufferCheckInterval;
-let pendingTransition = false;
+let videoElements = []; // Array of video elements
+let currentPlayingVideo = null;
+let cachedData = new Map(); // Track cached segments per stream
+let scrollContainer;
+let isScrolling = false;
+let lastScrollTime = 0;
 
-// DOM Elements
-const networkStatusElem = document.getElementById('networkStatus');
-const networkMessageElem = document.getElementById('networkMessage');
-const videoTitleElem = document.getElementById('videoTitle');
-const videoElement = document.getElementById('videoElement');
-const videoLoadingOverlay = document.getElementById('videoLoadingOverlay');
-const connectionOverlay = document.getElementById('connectionOverlay');
-const connectionStatus = document.getElementById('connectionStatus');
-const videoMessageElem = document.getElementById('videoMessage');
-const noVideoSourceElem = document.getElementById('noVideoSource');
-const cachedVideosListElem = document.getElementById('cachedVideosList');
-const segmentProgress = document.getElementById('segmentProgress');
-const cacheInfo = document.getElementById('cacheInfo');
-const prevButton = document.getElementById('prevButton');
-const nextButton = document.getElementById('nextButton');
-const clearCacheButton = document.getElementById('clearCacheButton');
+// Initialize the application
+document.addEventListener('DOMContentLoaded', async () => {
+    try {
+        await initializeDatabase();
+        initializeUI();
+        setupEventListeners();
+        await loadAllStreams();
+        updateNetworkStatus();
+        startPeriodicChecks();
+    } catch (error) {
+        console.error('Initialization failed:', error);
+        showError('Failed to initialize application');
+    }
+});
 
 // --- IndexedDB Functions ---
 
 /**
- * Opens the IndexedDB database for HLS segments.
+ * Initialize IndexedDB
  */
-function openDatabase() {
+function initializeDatabase() {
     return new Promise((resolve, reject) => {
         const request = indexedDB.open('HLSCacheDB', 1);
 
         request.onupgradeneeded = (event) => {
-            const db = event.target.result;
+            db = event.target.result;
             
-            // Create stores for segments and manifests
             if (!db.objectStoreNames.contains('segments')) {
                 db.createObjectStore('segments', { keyPath: 'id' });
             }
-            if (!db.objectStoreNames.contains('manifests')) {
-                db.createObjectStore('manifests', { keyPath: 'id' });
-            }
             
-            console.log('IndexedDB stores created/upgraded.');
+            console.log('Database initialized');
         };
 
         request.onsuccess = (event) => {
             db = event.target.result;
-            console.log('IndexedDB opened successfully.');
-            resolve(db);
-        };
-
-        request.onerror = (event) => {
-            console.error('IndexedDB error:', event.target.errorCode);
-            reject('Error opening IndexedDB');
-        };
-    });
-}
-
-/**
- * Stores a segment in IndexedDB.
- */
-function storeSegment(streamId, segmentIndex, data) {
-    return new Promise((resolve, reject) => {
-        if (!db) return reject('IndexedDB not initialized.');
-        
-        const transaction = db.transaction(['segments'], 'readwrite');
-        const store = transaction.objectStore('segments');
-        const id = `${streamId}_segment_${segmentIndex}`;
-        
-        const request = store.put({ 
-            id: id, 
-            streamId: streamId,
-            segmentIndex: segmentIndex,
-            data: data,
-            timestamp: Date.now()
-        });
-
-        request.onsuccess = () => {
-            console.log(`Segment ${segmentIndex} for stream ${streamId} stored.`);
             resolve();
         };
 
-        request.onerror = (event) => {
-            console.error(`Error storing segment:`, event.target.error);
-            reject(event.target.error);
+        request.onerror = () => {
+            reject(new Error('Failed to open database'));
         };
     });
 }
 
 /**
- * Retrieves a segment from IndexedDB.
+ * Store segment data with 15-second limit
  */
-function getSegment(streamId, segmentIndex) {
+async function storeSegment(streamId, segmentIndex, data, duration) {
     return new Promise((resolve, reject) => {
-        if (!db) return resolve(null);
+        if (!db) return reject(new Error('Database not initialized'));
         
-        const transaction = db.transaction(['segments'], 'readonly');
+        const transaction = db.transaction(['segments'], 'readwrite');
         const store = transaction.objectStore('segments');
-        const id = `${streamId}_segment_${segmentIndex}`;
-        const request = store.get(id);
-
-        request.onsuccess = () => {
-            if (request.result) {
-                resolve(request.result.data);
-            } else {
-                resolve(null);
-            }
+        const id = `${streamId}_${segmentIndex}`;
+        
+        const segmentData = {
+            id: id,
+            streamId: streamId,
+            segmentIndex: segmentIndex,
+            data: data,
+            duration: duration,
+            timestamp: Date.now()
         };
-
-        request.onerror = (event) => {
-            console.error(`Error retrieving segment:`, event.target.error);
-            reject(event.target.error);
+        
+        const request = store.put(segmentData);
+        
+        request.onsuccess = () => {
+            console.log(`Stored segment ${segmentIndex} (${duration}s) for ${streamId}`);
+            resolve();
+        };
+        
+        request.onerror = () => {
+            reject(new Error('Failed to store segment'));
         };
     });
 }
 
 /**
- * Get all cached segments for a stream.
+ * Get cached segments for a stream
  */
-function getCachedSegmentsForStream(streamId) {
+async function getCachedSegments(streamId) {
     return new Promise((resolve, reject) => {
         if (!db) return resolve([]);
         
         const transaction = db.transaction(['segments'], 'readonly');
         const store = transaction.objectStore('segments');
         const request = store.getAll();
-
+        
         request.onsuccess = () => {
             const allSegments = request.result || [];
             const streamSegments = allSegments
@@ -164,41 +131,40 @@ function getCachedSegmentsForStream(streamId) {
                 .sort((a, b) => a.segmentIndex - b.segmentIndex);
             resolve(streamSegments);
         };
-
-        request.onerror = (event) => {
-            reject(event.target.error);
+        
+        request.onerror = () => {
+            reject(new Error('Failed to get cached segments'));
         };
     });
 }
 
 /**
- * Clear all cached data.
+ * Clear all cached data
  */
-function clearAllCache() {
+async function clearCache() {
     return new Promise((resolve, reject) => {
-        if (!db) return reject('IndexedDB not initialized.');
+        if (!db) return reject(new Error('Database not initialized'));
         
-        const transaction = db.transaction(['segments', 'manifests'], 'readwrite');
-        const segmentStore = transaction.objectStore('segments');
-        const manifestStore = transaction.objectStore('manifests');
+        const transaction = db.transaction(['segments'], 'readwrite');
+        const store = transaction.objectStore('segments');
+        const request = store.clear();
         
-        const clearSegments = segmentStore.clear();
-        const clearManifests = manifestStore.clear();
-        
-        Promise.all([
-            new Promise(res => { clearSegments.onsuccess = () => res(); }),
-            new Promise(res => { clearManifests.onsuccess = () => res(); })
-        ]).then(() => {
-            console.log('All cache cleared.');
+        request.onsuccess = () => {
+            cachedData.clear();
+            console.log('Cache cleared');
             resolve();
-        }).catch(reject);
+        };
+        
+        request.onerror = () => {
+            reject(new Error('Failed to clear cache'));
+        };
     });
 }
 
 // --- HLS Processing Functions ---
 
 /**
- * Fetches and parses HLS manifest to extract segment URLs.
+ * Parse HLS manifest and extract segment URLs
  */
 async function parseHLSManifest(manifestUrl) {
     try {
@@ -209,615 +175,606 @@ async function parseHLSManifest(manifestUrl) {
         const lines = manifestText.split('\n');
         const segments = [];
         
-        let segmentDuration = 0;
+        let duration = 0;
         const baseUrl = manifestUrl.substring(0, manifestUrl.lastIndexOf('/') + 1);
         
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i].trim();
             
             if (line.startsWith('#EXTINF:')) {
-                // Extract duration
-                const durationMatch = line.match(/#EXTINF:([\d.]+)/);
-                if (durationMatch) {
-                    segmentDuration = parseFloat(durationMatch[1]);
+                const match = line.match(/#EXTINF:([\d.]+)/);
+                if (match) {
+                    duration = parseFloat(match[1]);
                 }
             } else if (line && !line.startsWith('#')) {
-                // This is a segment URL
-                const segmentUrl = line.startsWith('http') ? line : baseUrl + line;
-                segments.push({
-                    url: segmentUrl,
-                    duration: segmentDuration
-                });
+                const url = line.startsWith('http') ? line : baseUrl + line;
+                segments.push({ url, duration });
             }
         }
         
         return segments;
     } catch (error) {
-        console.error('Error parsing HLS manifest:', error);
+        console.error('Failed to parse manifest:', error);
         return [];
     }
 }
 
 /**
- * Downloads and caches the first N segments.
+ * Cache segments up to 15 seconds total duration
  */
-async function cacheInitialSegments(streamId, segments) {
-    const segmentsToCache = segments.slice(0, CACHE_SEGMENT_COUNT);
-    cachedSegments.clear();
-    totalCachedDuration = 0;
+async function cacheSegmentsForStream(streamId, segments) {
+    if (!isOnline || segments.length === 0) return;
     
-    for (let i = 0; i < segmentsToCache.length; i++) {
-        const segment = segmentsToCache[i];
+    let totalDuration = 0;
+    let cachedCount = 0;
+    
+    // Check existing cache
+    const existingSegments = await getCachedSegments(streamId);
+    if (existingSegments.length > 0) {
+        totalDuration = existingSegments.reduce((sum, seg) => sum + (seg.duration || 0), 0);
+        cachedCount = existingSegments.length;
+    }
+    
+    // Cache additional segments if needed
+    for (let i = cachedCount; i < segments.length && totalDuration < MAX_CACHE_DURATION; i++) {
+        const segment = segments[i];
         
         try {
-            // Check if already cached
-            const cached = await getSegment(streamId, i);
-            if (cached) {
-                cachedSegments.set(i, segment.url);
-                totalCachedDuration += segment.duration;
-                console.log(`Segment ${i} already cached`);
-                continue;
-            }
-            
-            if (!isOnline) break; // Can't download if offline
-            
-            console.log(`Downloading segment ${i}...`);
+            console.log(`Downloading segment ${i} for ${streamId}...`);
             const response = await fetch(segment.url);
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            if (!response.ok) continue;
             
             const data = await response.arrayBuffer();
-            await storeSegment(streamId, i, data);
-            cachedSegments.set(i, segment.url);
-            totalCachedDuration += segment.duration;
+            await storeSegment(streamId, i, data, segment.duration);
             
-            updateCacheInfo();
+            totalDuration += segment.duration;
+            cachedCount++;
             
+            // Update cache info for this stream
+            updateCacheStatus(streamId, cachedCount, totalDuration);
+            
+            if (totalDuration >= MAX_CACHE_DURATION) {
+                console.log(`Reached ${MAX_CACHE_DURATION}s cache limit for ${streamId}`);
+                break;
+            }
         } catch (error) {
-            console.error(`Error caching segment ${i}:`, error);
+            console.error(`Failed to cache segment ${i}:`, error);
             break;
         }
     }
     
-    console.log(`Cached ${cachedSegments.size} segments (${totalCachedDuration.toFixed(1)}s)`);
-    updateCachedVideosList();
+    // Store cache info
+    cachedData.set(streamId, { count: cachedCount, duration: totalDuration });
 }
 
-// --- Video Player Functions ---
-
 /**
- * Creates a Blob URL from cached segment data.
+ * Create video blob from cached segments
  */
-async function createBlobFromCachedSegments(streamId) {
-    const segments = [];
-    
-    for (let i = 0; i < CACHE_SEGMENT_COUNT; i++) {
-        const data = await getSegment(streamId, i);
-        if (data) {
-            segments.push(data);
-        } else {
-            break;
-        }
-    }
-    
+async function createVideoFromCache(streamId) {
+    const segments = await getCachedSegments(streamId);
     if (segments.length === 0) return null;
     
-    // Combine all segment data
-    const totalLength = segments.reduce((sum, data) => sum + data.byteLength, 0);
-    const combined = new Uint8Array(totalLength);
+    console.log(`Creating video from ${segments.length} cached segments`);
+    
+    // Combine segment data
+    const totalSize = segments.reduce((sum, seg) => sum + seg.data.byteLength, 0);
+    const combined = new Uint8Array(totalSize);
     let offset = 0;
     
-    for (const data of segments) {
-        combined.set(new Uint8Array(data), offset);
-        offset += data.byteLength;
+    for (const segment of segments) {
+        combined.set(new Uint8Array(segment.data), offset);
+        offset += segment.data.byteLength;
     }
     
     return URL.createObjectURL(new Blob([combined], { type: 'video/mp2t' }));
 }
 
+// --- UI Functions ---
+
 /**
- * Initializes HLS.js player.
+ * Initialize the user interface
  */
-function initializeHLS() {
-    if (hls) {
-        hls.destroy();
-    }
+function initializeUI() {
+    scrollContainer = document.getElementById('videoContainer');
     
-    if (Hls.isSupported()) {
-        hls = new Hls({
-            debug: false,
-            enableWorker: true,
-            lowLatencyMode: false,
-            backBufferLength: 90
-        });
-        
-        hls.attachMedia(videoElement);
-        
-        hls.on(Hls.Events.MEDIA_ATTACHED, () => {
-            console.log('HLS media attached');
-        });
-        
-        hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
-            console.log('HLS manifest parsed, levels:', data.levels.length);
-        });
-        
-        hls.on(Hls.Events.ERROR, (event, data) => {
-            console.error('HLS error:', data);
-            if (data.fatal) {
-                handleHLSError(data);
-            }
-        });
-        
-        hls.on(Hls.Events.FRAG_LOADED, (event, data) => {
-            // Track loaded fragments
-            updateSegmentProgress();
-        });
-        
-    } else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
-        // Native HLS support (Safari)
-        console.log('Using native HLS support');
-    } else {
-        console.error('HLS not supported');
-        videoMessageElem.textContent = 'HLS playback not supported in this browser.';
-    }
+    // Create video items for each stream
+    HLS_STREAMS.forEach((stream, index) => {
+        createVideoItem(stream, index);
+    });
 }
 
 /**
- * Handles HLS errors.
+ * Create a video item element
  */
-function handleHLSError(data) {
-    switch (data.type) {
-        case Hls.ErrorTypes.NETWORK_ERROR:
-            if (!isOnline) {
-                showConnectionRequired();
+function createVideoItem(stream, index) {
+    const videoItem = document.createElement('div');
+    videoItem.className = 'video-item';
+    videoItem.setAttribute('data-index', index);
+    
+    videoItem.innerHTML = `
+        <!-- Video Player -->
+        <video class="video-player" 
+               playsinline 
+               muted 
+               loop 
+               data-stream-id="${stream.id}">
+            Your browser does not support video playback.
+        </video>
+        
+        <!-- Video Overlay -->
+        <div class="video-overlay"></div>
+        
+        <!-- Loading Overlay -->
+        <div class="loading-overlay hidden">
+            <div class="spinner"></div>
+        </div>
+        
+        <!-- Connection Overlay -->
+        <div class="connection-overlay hidden">
+            <div class="connection-spinner"></div>
+            <div class="connection-title">Internet Connection Required</div>
+            <div class="connection-message">
+                The cached video (${MAX_CACHE_DURATION}s) has finished playing.<br>
+                Please connect to the internet to continue watching.
+            </div>
+            <div class="connection-status">Waiting for connection...</div>
+        </div>
+        
+        <!-- Error Message -->
+        <div class="error-message hidden">
+            <div>⚠️ Error Loading Video</div>
+            <div style="font-size: 12px; margin-top: 8px; opacity: 0.8;">
+                Swipe to try another video
+            </div>
+        </div>
+        
+        <!-- Video Info -->
+        <div class="video-info">
+            <div class="video-title">${stream.title}</div>
+            <div class="video-description">${stream.description}</div>
+            <div class="video-status" data-status="loading">Loading...</div>
+        </div>
+        
+        <!-- Side Controls -->
+        <div class="side-controls">
+            <button class="control-btn" onclick="togglePlay(${index})" title="Play/Pause">
+                ⏯️
+            </button>
+            <button class="control-btn" onclick="clearCache()" title="Clear Cache">
+                🗑️
+            </button>
+            <button class="control-btn" onclick="refreshVideo(${index})" title="Refresh">
+                🔄
+            </button>
+        </div>
+        
+        <!-- Progress Bar -->
+        <div class="progress-bar">
+            <div class="progress-fill"></div>
+        </div>
+        
+        <!-- Cache Info -->
+        <div class="cache-info">
+            <span class="cache-indicator none"></span>
+            <span class="cache-text">No cache</span>
+        </div>
+        
+        <!-- Scroll Hint (only on first video) -->
+        ${index === 0 ? `
+        <div class="scroll-hint">
+            <span class="scroll-arrow">↓</span>
+            <span>Swipe up for next video</span>
+        </div>
+        ` : ''}
+    `;
+    
+    scrollContainer.appendChild(videoItem);
+    
+    const video = videoItem.querySelector('.video-player');
+    videoElements.push(video);
+    
+    // Add video event listeners
+    setupVideoEvents(video, index);
+}
+
+/**
+ * Setup event listeners for a video element
+ */
+function setupVideoEvents(video, index) {
+    const videoItem = video.closest('.video-item');
+    const progressFill = videoItem.querySelector('.progress-fill');
+    const statusElement = videoItem.querySelector('.video-status');
+    
+    video.addEventListener('loadstart', () => {
+        statusElement.textContent = 'Loading...';
+        statusElement.setAttribute('data-status', 'loading');
+    });
+    
+    video.addEventListener('canplay', () => {
+        statusElement.textContent = 'Ready to play';
+        statusElement.setAttribute('data-status', 'ready');
+    });
+    
+    video.addEventListener('playing', () => {
+        statusElement.textContent = 'Playing';
+        statusElement.setAttribute('data-status', 'playing');
+    });
+    
+    video.addEventListener('pause', () => {
+        statusElement.textContent = 'Paused';
+        statusElement.setAttribute('data-status', 'paused');
+    });
+    
+    video.addEventListener('timeupdate', () => {
+        if (video.duration) {
+            const progress = (video.currentTime / video.duration) * 100;
+            progressFill.style.width = progress + '%';
+        }
+    });
+    
+    video.addEventListener('ended', () => {
+        statusElement.textContent = 'Ended';
+        statusElement.setAttribute('data-status', 'ended');
+        
+        // Check if we need to show connection overlay
+        if (!isOnline) {
+            showConnectionOverlay(videoItem);
+        }
+    });
+    
+    video.addEventListener('error', (e) => {
+        console.error('Video error:', e);
+        statusElement.textContent = 'Error';
+        statusElement.setAttribute('data-status', 'error');
+        showError('Video playback error', videoItem);
+    });
+    
+    // Click to play/pause
+    video.addEventListener('click', () => togglePlay(index));
+}
+
+/**
+ * Setup global event listeners
+ */
+function setupEventListeners() {
+    // Network status
+    window.addEventListener('online', () => {
+        isOnline = true;
+        updateNetworkStatus();
+        handleConnectionRestored();
+    });
+    
+    window.addEventListener('offline', () => {
+        isOnline = false;
+        updateNetworkStatus();
+    });
+    
+    // Scroll handling for TikTok-like behavior
+    let scrollTimeout;
+    scrollContainer.addEventListener('scroll', () => {
+        isScrolling = true;
+        clearTimeout(scrollTimeout);
+        
+        scrollTimeout = setTimeout(() => {
+            isScrolling = false;
+            handleScrollEnd();
+        }, 150);
+    });
+    
+    // Touch events for mobile
+    let touchStartY = 0;
+    scrollContainer.addEventListener('touchstart', (e) => {
+        touchStartY = e.touches[0].clientY;
+    });
+    
+    scrollContainer.addEventListener('touchend', (e) => {
+        const touchEndY = e.changedTouches[0].clientY;
+        const diffY = touchStartY - touchEndY;
+        
+        if (Math.abs(diffY) > 50) { // Minimum swipe distance
+            if (diffY > 0) {
+                // Swipe up - next video
+                scrollToNextVideo();
             } else {
-                console.log('Network error, attempting recovery...');
-                hls.startLoad();
-            }
-            break;
-        case Hls.ErrorTypes.MEDIA_ERROR:
-            console.log('Media error, attempting recovery...');
-            hls.recoverMediaError();
-            break;
-        default:
-            console.error('Fatal HLS error, destroying player');
-            hls.destroy();
-            break;
-    }
-}
-
-/**
- * Loads and plays the current stream.
- */
-async function loadCurrentStream() {
-    const stream = HLS_STREAMS[currentStreamIndex];
-    if (!stream) return;
-    
-    showLoading(true);
-    videoTitleElem.textContent = stream.title;
-    
-    // Parse manifest to get segment information
-    if (isOnline) {
-        segmentUrls = await parseHLSManifest(stream.src);
-        if (segmentUrls.length > 0) {
-            await cacheInitialSegments(stream.id, segmentUrls);
-        }
-    }
-    
-    // Check if we have cached segments
-    const cachedSegmentData = await getCachedSegmentsForStream(stream.id);
-    const hasCachedSegments = cachedSegmentData.length > 0;
-    
-    if (hasCachedSegments && !isOnline) {
-        // Play from cache only (offline)
-        await playFromCache(stream.id);
-    } else if (hasCachedSegments && isOnline) {
-        // Start from cache then transition to live
-        await playFromCacheWithTransition(stream);
-    } else if (isOnline) {
-        // Play live directly
-        await playLiveStream(stream);
-    } else {
-        // No cache and offline
-        showOfflineMessage();
-    }
-    
-    showLoading(false);
-}
-
-/**
- * Plays video from cached segments only.
- */
-async function playFromCache(streamId) {
-    try {
-        const blobUrl = await createBlobFromCachedSegments(streamId);
-        if (blobUrl) {
-            videoElement.src = blobUrl;
-            isPlayingFromCache = true;
-            videoMessageElem.textContent = `Playing from cache (${totalCachedDuration.toFixed(1)}s cached)`;
-            
-            // Set up monitoring for when cached content ends
-            startBufferMonitoring();
-            videoElement.play();
-        } else {
-            showOfflineMessage();
-        }
-    } catch (error) {
-        console.error('Error playing from cache:', error);
-        showOfflineMessage();
-    }
-}
-
-/**
- * Plays from cache initially, then transitions to live stream.
- */
-async function playFromCacheWithTransition(stream) {
-    try {
-        // Start with cached segments
-        await playFromCache(stream.id);
-        
-        // Prepare live stream in background
-        initializeHLS();
-        if (hls) {
-            hls.loadSource(stream.src);
-        } else {
-            // Native HLS support
-            const liveVideo = document.createElement('video');
-            liveVideo.src = stream.src;
-        }
-        
-        // Monitor for transition point
-        startTransitionMonitoring(stream);
-        
-    } catch (error) {
-        console.error('Error in cache-to-live transition:', error);
-        // Fallback to live stream
-        await playLiveStream(stream);
-    }
-}
-
-/**
- * Plays live HLS stream directly.
- */
-async function playLiveStream(stream) {
-    try {
-        initializeHLS();
-        
-        if (hls) {
-            hls.loadSource(stream.src);
-            videoMessageElem.textContent = 'Streaming live...';
-        } else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
-            videoElement.src = stream.src;
-            videoMessageElem.textContent = 'Streaming live (native HLS)...';
-        }
-        
-        isPlayingFromCache = false;
-        videoElement.play();
-        
-    } catch (error) {
-        console.error('Error playing live stream:', error);
-        videoMessageElem.textContent = 'Error loading stream.';
-    }
-}
-
-/**
- * Monitors buffer for transition from cache to live.
- */
-function startTransitionMonitoring(stream) {
-    if (bufferCheckInterval) clearInterval(bufferCheckInterval);
-    
-    bufferCheckInterval = setInterval(() => {
-        if (!isPlayingFromCache || pendingTransition) return;
-        
-        const currentTime = videoElement.currentTime;
-        const buffered = videoElement.buffered;
-        
-        if (buffered.length > 0) {
-            const bufferedEnd = buffered.end(buffered.length - 1);
-            const remainingBuffer = bufferedEnd - currentTime;
-            
-            // Transition when we're close to the end of cached content
-            if (remainingBuffer <= 2 && isOnline) {
-                transitionToLiveStream(stream);
-            } else if (remainingBuffer <= 0.5 && !isOnline) {
-                showConnectionRequired();
+                // Swipe down - previous video
+                scrollToPreviousVideo();
             }
         }
-    }, 500);
+    });
 }
 
 /**
- * Transitions from cached playback to live stream.
+ * Handle scroll end to determine current video
  */
-async function transitionToLiveStream(stream) {
-    if (pendingTransition) return;
-    pendingTransition = true;
+function handleScrollEnd() {
+    const containerRect = scrollContainer.getBoundingClientRect();
+    const videos = document.querySelectorAll('.video-item');
+    
+    let currentVideo = null;
+    let maxVisibleArea = 0;
+    
+    videos.forEach((videoItem, index) => {
+        const rect = videoItem.getBoundingClientRect();
+        const visibleHeight = Math.min(rect.bottom, containerRect.bottom) - Math.max(rect.top, containerRect.top);
+        const visibleArea = Math.max(0, visibleHeight) * rect.width;
+        
+        if (visibleArea > maxVisibleArea) {
+            maxVisibleArea = visibleArea;
+            currentVideo = { element: videoItem, index };
+        }
+    });
+    
+    if (currentVideo && currentVideo.index !== currentVideoIndex) {
+        switchToVideo(currentVideo.index);
+    }
+}
+
+/**
+ * Switch to a specific video
+ */
+async function switchToVideo(index) {
+    // Pause current video
+    if (currentPlayingVideo) {
+        currentPlayingVideo.pause();
+    }
+    
+    currentVideoIndex = index;
+    currentPlayingVideo = videoElements[index];
+    const stream = HLS_STREAMS[index];
+    
+    console.log(`Switching to video ${index}: ${stream.title}`);
+    
+    // Load and play the video
+    await loadVideoContent(currentPlayingVideo, stream);
+}
+
+/**
+ * Load video content (from cache or live)
+ */
+async function loadVideoContent(video, stream) {
+    const videoItem = video.closest('.video-item');
+    showLoading(videoItem, true);
     
     try {
-        console.log('Transitioning to live stream...');
-        const currentTime = videoElement.currentTime;
+        // Try cache first
+        const cachedUrl = await createVideoFromCache(stream.id);
         
-        // Initialize HLS for live stream
-        initializeHLS();
-        
-        if (hls) {
-            // Calculate the live position based on cached duration
-            hls.loadSource(stream.src);
+        if (cachedUrl) {
+            console.log(`Playing ${stream.id} from cache`);
+            video.src = cachedUrl;
+            video.load();
+            await video.play();
+            updateCacheDisplay(videoItem, true);
+        } else if (isOnline) {
+            console.log(`Streaming ${stream.id} live`);
+            // For simplicity, try direct video URL or fallback
+            video.src = stream.src;
+            video.load();
+            await video.play();
+            updateCacheDisplay(videoItem, false);
             
-            hls.once(Hls.Events.MANIFEST_PARSED, () => {
-                // Start live stream from appropriate position
-                const targetTime = currentTime; // Approximate position
-                hls.startLoad(targetTime);
-                
-                videoElement.currentTime = targetTime;
-                videoElement.play();
-                
-                isPlayingFromCache = false;
-                videoMessageElem.textContent = 'Transitioned to live stream';
-                
-                clearInterval(bufferCheckInterval);
-            });
+            // Start caching in background
+            cacheStreamInBackground(stream);
+        } else {
+            throw new Error('No cached content and offline');
         }
     } catch (error) {
-        console.error('Error transitioning to live stream:', error);
+        console.error(`Failed to load video ${stream.id}:`, error);
+        showError('Failed to load video', videoItem);
     } finally {
-        pendingTransition = false;
+        showLoading(videoItem, false);
     }
 }
 
 /**
- * Starts monitoring buffer status.
+ * Cache stream in background
  */
-function startBufferMonitoring() {
-    if (bufferCheckInterval) clearInterval(bufferCheckInterval);
-    
-    bufferCheckInterval = setInterval(() => {
-        updateSegmentProgress();
-        
-        if (isPlayingFromCache && !isOnline) {
-            const currentTime = videoElement.currentTime;
-            const buffered = videoElement.buffered;
-            
-            if (buffered.length > 0) {
-                const bufferedEnd = buffered.end(buffered.length - 1);
-                const remainingBuffer = bufferedEnd - currentTime;
-                
-                if (remainingBuffer <= 1) {
-                    showConnectionRequired();
-                }
-            }
+async function cacheStreamInBackground(stream) {
+    try {
+        const segments = await parseHLSManifest(stream.src);
+        if (segments.length > 0) {
+            await cacheSegmentsForStream(stream.id, segments);
         }
-    }, 1000);
+    } catch (error) {
+        console.error(`Background caching failed for ${stream.id}:`, error);
+    }
 }
 
 /**
- * Shows the connection required overlay.
+ * Load all streams initially
  */
-function showConnectionRequired() {
-    connectionOverlay.classList.remove('hidden');
-    videoElement.pause();
+async function loadAllStreams() {
+    // Load the first video
+    await switchToVideo(0);
     
-    // Start checking for connection
-    if (connectionCheckInterval) clearInterval(connectionCheckInterval);
-    
-    connectionCheckInterval = setInterval(() => {
-        if (isOnline) {
-            hideConnectionRequired();
-            // Resume or transition to live stream
-            const stream = HLS_STREAMS[currentStreamIndex];
-            if (stream) {
-                playLiveStream(stream);
-            }
+    // Cache other streams in background if online
+    if (isOnline) {
+        for (let i = 1; i < HLS_STREAMS.length; i++) {
+            cacheStreamInBackground(HLS_STREAMS[i]);
         }
-    }, 1000);
-}
-
-/**
- * Hides the connection required overlay.
- */
-function hideConnectionRequired() {
-    connectionOverlay.classList.add('hidden');
-    if (connectionCheckInterval) {
-        clearInterval(connectionCheckInterval);
-        connectionCheckInterval = null;
     }
 }
 
-/**
- * Shows/hides loading overlay.
- */
-function showLoading(show) {
-    if (show) {
-        videoLoadingOverlay.classList.remove('hidden');
-    } else {
-        videoLoadingOverlay.classList.add('hidden');
-    }
-}
+// --- Utility Functions ---
 
 /**
- * Shows offline message.
- */
-function showOfflineMessage() {
-    videoMessageElem.textContent = 'No cached content available. Please connect to the internet.';
-    noVideoSourceElem.classList.remove('hidden');
-    videoElement.classList.add('hidden');
-}
-
-// --- UI Update Functions ---
-
-/**
- * Updates network status display.
+ * Update network status display
  */
 function updateNetworkStatus() {
-    networkStatusElem.textContent = `Network Status: ${isOnline ? 'Online' : 'Offline'}`;
-    networkStatusElem.classList.toggle('text-green-400', isOnline);
-    networkStatusElem.classList.toggle('text-red-400', !isOnline);
+    const statusElement = document.getElementById('networkStatus');
+    const dotElement = document.getElementById('networkDot');
     
-    if (isOnline) {
-        hideConnectionRequired();
-        connectionStatus.textContent = 'Connected!';
-    } else {
-        connectionStatus.textContent = 'Waiting for connection...';
-    }
+    statusElement.textContent = isOnline ? 'Online' : 'Offline';
+    dotElement.className = isOnline ? 'network-dot' : 'network-dot offline';
 }
 
 /**
- * Updates segment progress information.
+ * Update cache status for a stream
  */
-function updateSegmentProgress() {
-    if (!videoElement.buffered.length) return;
+function updateCacheStatus(streamId, count, duration) {
+    const videoItems = document.querySelectorAll('.video-item');
     
-    const currentTime = videoElement.currentTime;
-    const buffered = videoElement.buffered;
-    const duration = videoElement.duration;
-    
-    if (buffered.length > 0 && duration) {
-        const bufferedEnd = buffered.end(buffered.length - 1);
-        const bufferedPercent = (bufferedEnd / duration * 100).toFixed(1);
-        const currentPercent = (currentTime / duration * 100).toFixed(1);
-        
-        segmentProgress.textContent = `Progress: ${currentPercent}% | Buffered: ${bufferedPercent}%`;
-    }
-}
-
-/**
- * Updates cache information display.
- */
-function updateCacheInfo() {
-    const stream = HLS_STREAMS[currentStreamIndex];
-    if (stream && cachedSegments.size > 0) {
-        cacheInfo.textContent = `Cached: ${cachedSegments.size} segments (${totalCachedDuration.toFixed(1)}s)`;
-    } else {
-        cacheInfo.textContent = 'No segments cached';
-    }
-}
-
-/**
- * Updates the cached videos list display.
- */
-async function updateCachedVideosList() {
-    cachedVideosListElem.innerHTML = '';
-    
-    let hasCachedContent = false;
-    
-    for (const stream of HLS_STREAMS) {
-        const segments = await getCachedSegmentsForStream(stream.id);
-        if (segments.length > 0) {
-            hasCachedContent = true;
-            const div = document.createElement('div');
-            div.className = 'bg-gray-700 p-3 rounded-lg flex items-center justify-between';
-            div.innerHTML = `
-                <span class="text-gray-200 text-sm">${stream.title}</span>
-                <span class="text-green-400 text-xs">${segments.length} segments</span>
-            `;
-            cachedVideosListElem.appendChild(div);
+    videoItems.forEach(item => {
+        const video = item.querySelector('.video-player');
+        if (video.getAttribute('data-stream-id') === streamId) {
+            updateCacheDisplay(item, true, count, duration);
         }
-    }
+    });
+}
+
+/**
+ * Update cache display for a video item
+ */
+function updateCacheDisplay(videoItem, isCached, count = 0, duration = 0) {
+    const indicator = videoItem.querySelector('.cache-indicator');
+    const text = videoItem.querySelector('.cache-text');
     
-    if (!hasCachedContent) {
-        cachedVideosListElem.innerHTML = '<p class="text-gray-400 text-center text-sm">No segments cached yet.</p>';
+    if (isCached && duration > 0) {
+        indicator.className = duration >= MAX_CACHE_DURATION ? 'cache-indicator' : 'cache-indicator partial';
+        text.textContent = `${duration.toFixed(1)}s cached`;
+    } else if (isCached) {
+        indicator.className = 'cache-indicator partial';
+        text.textContent = 'Partially cached';
+    } else {
+        indicator.className = 'cache-indicator none';
+        text.textContent = 'No cache';
     }
 }
 
-// --- Navigation Functions ---
-
 /**
- * Goes to the next stream.
+ * Show/hide loading overlay
  */
-function goToNextStream() {
-    currentStreamIndex = (currentStreamIndex + 1) % HLS_STREAMS.length;
-    loadCurrentStream();
+function showLoading(videoItem, show) {
+    const overlay = videoItem.querySelector('.loading-overlay');
+    overlay.classList.toggle('hidden', !show);
 }
 
 /**
- * Goes to the previous stream.
+ * Show connection overlay
  */
-function goToPreviousStream() {
-    currentStreamIndex = (currentStreamIndex - 1 + HLS_STREAMS.length) % HLS_STREAMS.length;
-    loadCurrentStream();
+function showConnectionOverlay(videoItem) {
+    const overlay = videoItem.querySelector('.connection-overlay');
+    overlay.classList.remove('hidden');
 }
 
 /**
- * Clears all cached content.
+ * Hide connection overlay
  */
-async function clearCache() {
-    try {
-        await clearAllCache();
-        cachedSegments.clear();
-        totalCachedDuration = 0;
-        updateCachedVideosList();
-        updateCacheInfo();
-        networkMessageElem.textContent = 'Cache cleared successfully!';
-        setTimeout(() => {
-            networkMessageElem.textContent = '';
-        }, 3000);
-    } catch (error) {
-        console.error('Error clearing cache:', error);
-        networkMessageElem.textContent = 'Error clearing cache.';
+function hideConnectionOverlay(videoItem) {
+    const overlay = videoItem.querySelector('.connection-overlay');
+    overlay.classList.add('hidden');
+}
+
+/**
+ * Show error message
+ */
+function showError(message, videoItem = null) {
+    if (videoItem) {
+        const errorElement = videoItem.querySelector('.error-message');
+        errorElement.querySelector('div').textContent = message;
+        errorElement.classList.remove('hidden');
+    } else {
+        console.error(message);
     }
 }
 
-// --- Event Listeners and Initialization ---
+/**
+ * Handle connection restored
+ */
+function handleConnectionRestored() {
+    // Hide all connection overlays
+    document.querySelectorAll('.connection-overlay').forEach(overlay => {
+        overlay.classList.add('hidden');
+    });
+    
+    // Resume current video if possible
+    if (currentPlayingVideo) {
+        const stream = HLS_STREAMS[currentVideoIndex];
+        loadVideoContent(currentPlayingVideo, stream);
+    }
+}
 
-document.addEventListener('DOMContentLoaded', async () => {
-    try {
-        // Initialize IndexedDB
-        await openDatabase();
-        updateNetworkStatus();
-        
-        // Load initial stream
-        await loadCurrentStream();
-        await updateCachedVideosList();
-        
-        // Network status listeners
-        window.addEventListener('online', () => {
-            isOnline = true;
-            updateNetworkStatus();
-            networkMessageElem.textContent = 'Connection restored!';
+/**
+ * Scroll to next video
+ */
+function scrollToNextVideo() {
+    const nextIndex = (currentVideoIndex + 1) % HLS_STREAMS.length;
+    const nextVideo = document.querySelector(`[data-index="${nextIndex}"]`);
+    if (nextVideo) {
+        nextVideo.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+}
+
+/**
+ * Scroll to previous video
+ */
+function scrollToPreviousVideo() {
+    const prevIndex = (currentVideoIndex - 1 + HLS_STREAMS.length) % HLS_STREAMS.length;
+    const prevVideo = document.querySelector(`[data-index="${prevIndex}"]`);
+    if (prevVideo) {
+        prevVideo.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+}
+
+/**
+ * Start periodic checks
+ */
+function startPeriodicChecks() {
+    setInterval(() => {
+        // Check if current video is near end and no internet
+        if (currentPlayingVideo && !isOnline) {
+            const video = currentPlayingVideo;
+            const timeLeft = video.duration - video.currentTime;
             
-            // If we were showing connection required, try to resume
-            if (!connectionOverlay.classList.contains('hidden')) {
-                const stream = HLS_STREAMS[currentStreamIndex];
-                if (stream) {
-                    playLiveStream(stream);
-                }
+            if (timeLeft <= 2 && timeLeft > 0) { // 2 seconds before end
+                const videoItem = video.closest('.video-item');
+                showConnectionOverlay(videoItem);
             }
-        });
-        
-        window.addEventListener('offline', () => {
-            isOnline = false;
-            updateNetworkStatus();
-            networkMessageElem.textContent = 'Connection lost. Playing from cache if available.';
-        });
-        
-        // Video event listeners
-        videoElement.addEventListener('timeupdate', updateSegmentProgress);
-        videoElement.addEventListener('error', (e) => {
-            console.error('Video error:', e);
-            if (!isOnline) {
-                showConnectionRequired();
-            }
-        });
-        
-        // Button listeners
-        prevButton.addEventListener('click', goToPreviousStream);
-        nextButton.addEventListener('click', goToNextStream);
-        clearCacheButton.addEventListener('click', clearCache);
-        
-    } catch (error) {
-        console.error('Initialization error:', error);
-        networkMessageElem.textContent = 'Application initialization failed.';
-    }
-});
+        }
+    }, SEGMENT_CHECK_INTERVAL);
+}
 
-// Cleanup on page unload
-window.addEventListener('beforeunload', () => {
-    if (hls) {
-        hls.destroy();
+// --- Control Functions ---
+
+/**
+ * Toggle play/pause for a video
+ */
+function togglePlay(index) {
+    const video = videoElements[index];
+    if (video.paused) {
+        video.play().catch(e => console.error('Play failed:', e));
+    } else {
+        video.pause();
     }
-    if (bufferCheckInterval) {
-        clearInterval(bufferCheckInterval);
+}
+
+/**
+ * Refresh a video
+ */
+async function refreshVideo(index) {
+    const video = videoElements[index];
+    const stream = HLS_STREAMS[index];
+    
+    video.pause();
+    video.src = '';
+    
+    await loadVideoContent(video, stream);
+}
+
+// Global functions for button clicks
+window.togglePlay = togglePlay;
+window.refreshVideo = refreshVideo;
+window.clearCache = async () => {
+    try {
+        await clearCache();
+        
+        // Update all cache displays
+        document.querySelectorAll('.video-item').forEach(item => {
+            updateCacheDisplay(item, false);
+        });
+        
+        console.log('Cache cleared successfully');
+    } catch (error) {
+        console.error('Failed to clear cache:', error);
     }
-    if (connectionCheckInterval) {
-        clearInterval(connectionCheckInterval);
-    }
-});
+};
