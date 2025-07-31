@@ -2,21 +2,24 @@
 const HLS_STREAMS = [
     { 
         id: 'stream1', 
-        title: 'Sample HLS Stream', 
+        title: 'Sample Video Stream', 
         description: 'High quality video streaming with offline support',
-        src: 'https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8' 
+        src: 'https://www.learningcontainer.com/wp-content/uploads/2020/05/sample-mp4-file.mp4',
+        hlsSrc: 'https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8'
     },
     { 
         id: 'stream2', 
-        title: 'Demo Video Stream', 
+        title: 'Demo Video Content', 
         description: 'Professional content delivery',
-        src: 'https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel.ism/.m3u8' 
+        src: 'https://sample-videos.com/zip/10/mp4/360/SampleVideo_360x240_2mb.mp4',
+        hlsSrc: 'https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel.ism/.m3u8'
     },
     { 
         id: 'stream3', 
         title: 'Sample Content', 
         description: 'Smooth streaming experience',
-        src: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8' 
+        src: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
+        hlsSrc: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8'
     }
 ];
 
@@ -57,20 +60,31 @@ document.addEventListener('DOMContentLoaded', async () => {
  */
 function initializeDatabase() {
     return new Promise((resolve, reject) => {
-        const request = indexedDB.open('HLSCacheDB', 1);
+        const request = indexedDB.open('HLSCacheDB', 2);
 
         request.onupgradeneeded = (event) => {
             db = event.target.result;
             
-            if (!db.objectStoreNames.contains('segments')) {
-                db.createObjectStore('segments', { keyPath: 'id' });
+            // Clear existing stores if they exist
+            if (db.objectStoreNames.contains('segments')) {
+                db.deleteObjectStore('segments');
             }
             
-            console.log('Database initialized');
+            // Create new object store with proper key structure
+            const segmentStore = db.createObjectStore('segments', { 
+                keyPath: 'id'
+            });
+            
+            // Create indexes for better querying
+            segmentStore.createIndex('streamId', 'streamId', { unique: false });
+            segmentStore.createIndex('segmentIndex', 'segmentIndex', { unique: false });
+            
+            console.log('Database initialized with proper structure');
         };
 
         request.onsuccess = (event) => {
             db = event.target.result;
+            console.log('Database opened successfully');
             resolve();
         };
 
@@ -89,14 +103,16 @@ async function storeSegment(streamId, segmentIndex, data, duration) {
         
         const transaction = db.transaction(['segments'], 'readwrite');
         const store = transaction.objectStore('segments');
-        const id = `${streamId}_${segmentIndex}`;
+        
+        // Create unique ID for the segment
+        const segmentId = `${streamId}_segment_${segmentIndex}`;
         
         const segmentData = {
-            id: id,
+            id: segmentId,
             streamId: streamId,
             segmentIndex: segmentIndex,
             data: data,
-            duration: duration,
+            duration: duration || 0,
             timestamp: Date.now()
         };
         
@@ -107,8 +123,9 @@ async function storeSegment(streamId, segmentIndex, data, duration) {
             resolve();
         };
         
-        request.onerror = () => {
-            reject(new Error('Failed to store segment'));
+        request.onerror = (event) => {
+            console.error('Error storing segment:', event.target.error);
+            reject(new Error('Failed to store segment: ' + event.target.error.message));
         };
     });
 }
@@ -122,17 +139,18 @@ async function getCachedSegments(streamId) {
         
         const transaction = db.transaction(['segments'], 'readonly');
         const store = transaction.objectStore('segments');
-        const request = store.getAll();
+        const index = store.index('streamId');
+        const request = index.getAll(streamId);
         
         request.onsuccess = () => {
-            const allSegments = request.result || [];
-            const streamSegments = allSegments
-                .filter(segment => segment.streamId === streamId)
-                .sort((a, b) => a.segmentIndex - b.segmentIndex);
-            resolve(streamSegments);
+            const segments = request.result || [];
+            // Sort by segment index
+            segments.sort((a, b) => a.segmentIndex - b.segmentIndex);
+            resolve(segments);
         };
         
-        request.onerror = () => {
+        request.onerror = (event) => {
+            console.error('Error getting cached segments:', event.target.error);
             reject(new Error('Failed to get cached segments'));
         };
     });
@@ -155,46 +173,50 @@ async function clearCache() {
             resolve();
         };
         
-        request.onerror = () => {
+        request.onerror = (event) => {
+            console.error('Error clearing cache:', event.target.error);
             reject(new Error('Failed to clear cache'));
         };
     });
 }
 
-// --- HLS Processing Functions ---
+// --- Video Processing Functions ---
 
 /**
- * Parse HLS manifest and extract segment URLs
+ * Create video segments from a regular video file (simulate HLS segments)
  */
-async function parseHLSManifest(manifestUrl) {
+async function createVideoSegments(videoUrl, streamId) {
     try {
-        const response = await fetch(manifestUrl);
+        console.log(`Creating segments for ${streamId} from ${videoUrl}`);
+        
+        // For demonstration, we'll create "segments" by fetching parts of the video file
+        // In a real HLS implementation, these would be actual .ts files
+        
+        const response = await fetch(videoUrl, { method: 'HEAD' });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         
-        const manifestText = await response.text();
-        const lines = manifestText.split('\n');
+        const contentLength = parseInt(response.headers.get('content-length') || '0');
+        if (contentLength === 0) throw new Error('Could not determine file size');
+        
+        // Create segments (simulate 3-second segments)
         const segments = [];
+        const segmentSize = Math.min(contentLength / 10, 500000); // Max 500KB per segment
+        const segmentDuration = 3; // 3 seconds per segment
         
-        let duration = 0;
-        const baseUrl = manifestUrl.substring(0, manifestUrl.lastIndexOf('/') + 1);
-        
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].trim();
+        for (let i = 0; i < 5; i++) { // Create 5 segments (15 seconds total)
+            const start = i * segmentSize;
+            const end = Math.min(start + segmentSize - 1, contentLength - 1);
             
-            if (line.startsWith('#EXTINF:')) {
-                const match = line.match(/#EXTINF:([\d.]+)/);
-                if (match) {
-                    duration = parseFloat(match[1]);
-                }
-            } else if (line && !line.startsWith('#')) {
-                const url = line.startsWith('http') ? line : baseUrl + line;
-                segments.push({ url, duration });
-            }
+            segments.push({
+                url: videoUrl,
+                duration: segmentDuration,
+                range: `bytes=${start}-${end}`
+            });
         }
         
         return segments;
     } catch (error) {
-        console.error('Failed to parse manifest:', error);
+        console.error(`Error creating segments for ${streamId}:`, error);
         return [];
     }
 }
@@ -202,71 +224,98 @@ async function parseHLSManifest(manifestUrl) {
 /**
  * Cache segments up to 15 seconds total duration
  */
-async function cacheSegmentsForStream(streamId, segments) {
-    if (!isOnline || segments.length === 0) return;
+async function cacheSegmentsForStream(streamId, videoUrl) {
+    if (!isOnline) return;
     
-    let totalDuration = 0;
-    let cachedCount = 0;
-    
-    // Check existing cache
-    const existingSegments = await getCachedSegments(streamId);
-    if (existingSegments.length > 0) {
-        totalDuration = existingSegments.reduce((sum, seg) => sum + (seg.duration || 0), 0);
-        cachedCount = existingSegments.length;
-    }
-    
-    // Cache additional segments if needed
-    for (let i = cachedCount; i < segments.length && totalDuration < MAX_CACHE_DURATION; i++) {
-        const segment = segments[i];
-        
-        try {
-            console.log(`Downloading segment ${i} for ${streamId}...`);
-            const response = await fetch(segment.url);
-            if (!response.ok) continue;
-            
-            const data = await response.arrayBuffer();
-            await storeSegment(streamId, i, data, segment.duration);
-            
-            totalDuration += segment.duration;
-            cachedCount++;
-            
-            // Update cache info for this stream
-            updateCacheStatus(streamId, cachedCount, totalDuration);
-            
+    try {
+        // Check if already cached
+        const existingSegments = await getCachedSegments(streamId);
+        if (existingSegments.length > 0) {
+            const totalDuration = existingSegments.reduce((sum, seg) => sum + (seg.duration || 0), 0);
+            console.log(`Stream ${streamId} already has ${totalDuration.toFixed(1)}s cached`);
             if (totalDuration >= MAX_CACHE_DURATION) {
-                console.log(`Reached ${MAX_CACHE_DURATION}s cache limit for ${streamId}`);
+                updateCacheStatus(streamId, existingSegments.length, totalDuration);
+                return;
+            }
+        }
+        
+        // Create video segments
+        const segments = await createVideoSegments(videoUrl, streamId);
+        if (segments.length === 0) return;
+        
+        let totalDuration = existingSegments.reduce((sum, seg) => sum + (seg.duration || 0), 0);
+        let cachedCount = existingSegments.length;
+        
+        // Cache segments up to 15 seconds
+        for (let i = cachedCount; i < segments.length && totalDuration < MAX_CACHE_DURATION; i++) {
+            const segment = segments[i];
+            
+            try {
+                console.log(`Downloading segment ${i} for ${streamId}...`);
+                
+                const response = await fetch(segment.url, {
+                    headers: {
+                        'Range': segment.range
+                    }
+                });
+                
+                if (!response.ok) {
+                    console.warn(`Failed to fetch segment ${i}: HTTP ${response.status}`);
+                    continue;
+                }
+                
+                const data = await response.arrayBuffer();
+                await storeSegment(streamId, i, data, segment.duration);
+                
+                totalDuration += segment.duration;
+                cachedCount++;
+                
+                // Update cache info for this stream
+                updateCacheStatus(streamId, cachedCount, totalDuration);
+                
+                if (totalDuration >= MAX_CACHE_DURATION) {
+                    console.log(`Reached ${MAX_CACHE_DURATION}s cache limit for ${streamId}`);
+                    break;
+                }
+            } catch (error) {
+                console.error(`Failed to cache segment ${i}:`, error);
                 break;
             }
-        } catch (error) {
-            console.error(`Failed to cache segment ${i}:`, error);
-            break;
         }
+        
+        // Store cache info
+        cachedData.set(streamId, { count: cachedCount, duration: totalDuration });
+        
+    } catch (error) {
+        console.error(`Error caching segments for ${streamId}:`, error);
     }
-    
-    // Store cache info
-    cachedData.set(streamId, { count: cachedCount, duration: totalDuration });
 }
 
 /**
  * Create video blob from cached segments
  */
 async function createVideoFromCache(streamId) {
-    const segments = await getCachedSegments(streamId);
-    if (segments.length === 0) return null;
-    
-    console.log(`Creating video from ${segments.length} cached segments`);
-    
-    // Combine segment data
-    const totalSize = segments.reduce((sum, seg) => sum + seg.data.byteLength, 0);
-    const combined = new Uint8Array(totalSize);
-    let offset = 0;
-    
-    for (const segment of segments) {
-        combined.set(new Uint8Array(segment.data), offset);
-        offset += segment.data.byteLength;
+    try {
+        const segments = await getCachedSegments(streamId);
+        if (segments.length === 0) return null;
+        
+        console.log(`Creating video from ${segments.length} cached segments for ${streamId}`);
+        
+        // Combine segment data
+        const totalSize = segments.reduce((sum, seg) => sum + seg.data.byteLength, 0);
+        const combined = new Uint8Array(totalSize);
+        let offset = 0;
+        
+        for (const segment of segments) {
+            combined.set(new Uint8Array(segment.data), offset);
+            offset += segment.data.byteLength;
+        }
+        
+        return URL.createObjectURL(new Blob([combined], { type: 'video/mp4' }));
+    } catch (error) {
+        console.error(`Error creating video from cache for ${streamId}:`, error);
+        return null;
     }
-    
-    return URL.createObjectURL(new Blob([combined], { type: 'video/mp2t' }));
 }
 
 // --- UI Functions ---
@@ -297,6 +346,7 @@ function createVideoItem(stream, index) {
                playsinline 
                muted 
                loop 
+               preload="metadata"
                data-stream-id="${stream.id}">
             Your browser does not support video playback.
         </video>
@@ -384,10 +434,12 @@ function setupVideoEvents(video, index) {
     const videoItem = video.closest('.video-item');
     const progressFill = videoItem.querySelector('.progress-fill');
     const statusElement = videoItem.querySelector('.video-status');
+    const errorElement = videoItem.querySelector('.error-message');
     
     video.addEventListener('loadstart', () => {
         statusElement.textContent = 'Loading...';
         statusElement.setAttribute('data-status', 'loading');
+        errorElement.classList.add('hidden');
     });
     
     video.addEventListener('canplay', () => {
@@ -426,7 +478,16 @@ function setupVideoEvents(video, index) {
         console.error('Video error:', e);
         statusElement.textContent = 'Error';
         statusElement.setAttribute('data-status', 'error');
-        showError('Video playback error', videoItem);
+        
+        // Try fallback URL if available
+        const stream = HLS_STREAMS[index];
+        if (stream && video.src !== stream.src && stream.src) {
+            console.log(`Trying fallback URL for ${stream.id}`);
+            video.src = stream.src;
+            video.load();
+        } else {
+            showError('Video playback error', videoItem);
+        }
     });
     
     // Click to play/pause
@@ -547,7 +608,7 @@ async function loadVideoContent(video, stream) {
             updateCacheDisplay(videoItem, true);
         } else if (isOnline) {
             console.log(`Streaming ${stream.id} live`);
-            // For simplicity, try direct video URL or fallback
+            // Use the regular MP4 source for better compatibility
             video.src = stream.src;
             video.load();
             await video.play();
@@ -571,9 +632,8 @@ async function loadVideoContent(video, stream) {
  */
 async function cacheStreamInBackground(stream) {
     try {
-        const segments = await parseHLSManifest(stream.src);
-        if (segments.length > 0) {
-            await cacheSegmentsForStream(stream.id, segments);
+        if (stream.src) {
+            await cacheSegmentsForStream(stream.id, stream.src);
         }
     } catch (error) {
         console.error(`Background caching failed for ${stream.id}:`, error);
@@ -590,7 +650,9 @@ async function loadAllStreams() {
     // Cache other streams in background if online
     if (isOnline) {
         for (let i = 1; i < HLS_STREAMS.length; i++) {
-            cacheStreamInBackground(HLS_STREAMS[i]);
+            setTimeout(() => {
+                cacheStreamInBackground(HLS_STREAMS[i]);
+            }, i * 1000); // Stagger the caching to avoid overwhelming the browser
         }
     }
 }
@@ -673,6 +735,11 @@ function showError(message, videoItem = null) {
         const errorElement = videoItem.querySelector('.error-message');
         errorElement.querySelector('div').textContent = message;
         errorElement.classList.remove('hidden');
+        
+        // Hide error after 5 seconds
+        setTimeout(() => {
+            errorElement.classList.add('hidden');
+        }, 5000);
     } else {
         console.error(message);
     }
@@ -724,11 +791,13 @@ function startPeriodicChecks() {
         // Check if current video is near end and no internet
         if (currentPlayingVideo && !isOnline) {
             const video = currentPlayingVideo;
-            const timeLeft = video.duration - video.currentTime;
-            
-            if (timeLeft <= 2 && timeLeft > 0) { // 2 seconds before end
-                const videoItem = video.closest('.video-item');
-                showConnectionOverlay(videoItem);
+            if (video.duration && video.currentTime) {
+                const timeLeft = video.duration - video.currentTime;
+                
+                if (timeLeft <= 2 && timeLeft > 0) { // 2 seconds before end
+                    const videoItem = video.closest('.video-item');
+                    showConnectionOverlay(videoItem);
+                }
             }
         }
     }, SEGMENT_CHECK_INTERVAL);
