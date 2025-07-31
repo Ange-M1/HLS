@@ -1,0 +1,8 @@
+/* Custom styles for Inter font and general layout */
+body {
+  font-family: 'Inter', sans-serif;
+}
+/* Ensure video container maintains aspect ratio */
+.aspect-video {
+  aspect-ratio: 16 / 9;
+}
