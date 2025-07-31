@@ -19,39 +19,91 @@ const VIDEOS = [
     }
 ];
 
+const CACHE_DURATION = 15; // 15 seconds cache
+const SEGMENT_SIZE = 1024 * 1024; // 1MB per segment
+
 let currentIndex = 0;
 let isOnline = navigator.onLine;
 let db;
 let videos = [];
 let currentVideo = null;
 let container;
+let cacheStatus = new Map(); // Track cache status for each video
 
 document.addEventListener('DOMContentLoaded', async () => {
     await initDB();
     initUI();
     setupEvents();
+    await loadCacheStatus();
     await loadVideo(0);
     updateNetworkStatus();
+    startCacheProcess();
 });
 
 async function initDB() {
     return new Promise((resolve, reject) => {
-        const request = indexedDB.open('VideoCache', 1);
+        const request = indexedDB.open('VideoCache', 2);
         
         request.onupgradeneeded = (e) => {
             db = e.target.result;
-            if (!db.objectStoreNames.contains('segments')) {
-                const store = db.createObjectStore('segments', { keyPath: 'id' });
-                store.createIndex('videoId', 'videoId', { unique: false });
+            
+            // Clear old stores if they exist
+            if (db.objectStoreNames.contains('segments')) {
+                db.deleteObjectStore('segments');
             }
+            if (db.objectStoreNames.contains('metadata')) {
+                db.deleteObjectStore('metadata');
+            }
+            
+            // Create new stores
+            const segmentStore = db.createObjectStore('segments', { keyPath: 'id' });
+            segmentStore.createIndex('videoId', 'videoId', { unique: false });
+            
+            const metaStore = db.createObjectStore('metadata', { keyPath: 'videoId' });
+            
+            console.log('Database initialized');
         };
         
         request.onsuccess = (e) => {
             db = e.target.result;
+            console.log('Database ready');
             resolve();
         };
         
-        request.onerror = () => reject();
+        request.onerror = () => {
+            console.error('Database failed');
+            reject();
+        };
+    });
+}
+
+async function loadCacheStatus() {
+    for (const video of VIDEOS) {
+        const cached = await checkCacheExists(video.id);
+        cacheStatus.set(video.id, cached);
+        updateVideoCache(video.id, cached);
+    }
+}
+
+async function checkCacheExists(videoId) {
+    return new Promise((resolve) => {
+        if (!db) return resolve(false);
+        
+        const tx = db.transaction(['metadata'], 'readonly');
+        const store = tx.objectStore('metadata');
+        const request = store.get(videoId);
+        
+        request.onsuccess = () => {
+            const meta = request.result;
+            if (meta && meta.cached && meta.segments >= 3) {
+                console.log(`${videoId} found in cache (${meta.duration}s)`);
+                resolve(true);
+            } else {
+                resolve(false);
+            }
+        };
+        
+        request.onerror = () => resolve(false);
     });
 }
 
@@ -73,9 +125,12 @@ function initUI() {
             
             <div class="connection-overlay hidden">
                 <div class="connection-spinner"></div>
-                <div class="connection-title">Connection Required</div>
-                <div class="connection-message">Cached content finished. Connect to continue.</div>
-                <div class="connection-status">Waiting...</div>
+                <div class="connection-title">Internet Connection Required</div>
+                <div class="connection-message">
+                    Your 15-second cached video has finished.<br>
+                    Please connect to the internet to continue watching.
+                </div>
+                <div class="connection-status">Waiting for connection...</div>
             </div>
             
             <div class="error-message hidden">
@@ -126,18 +181,40 @@ function setupVideoEvents(video, index) {
         error.classList.add('hidden');
     });
     
-    video.addEventListener('canplay', () => status.textContent = 'Ready');
+    video.addEventListener('canplay', () => {
+        status.textContent = 'Ready';
+        // Auto-play when ready
+        if (index === currentIndex) {
+            video.play().catch(() => console.log('Auto-play blocked'));
+        }
+    });
+    
     video.addEventListener('playing', () => status.textContent = 'Playing');
     video.addEventListener('pause', () => status.textContent = 'Paused');
-    video.addEventListener('ended', () => {
-        status.textContent = 'Ended';
-        if (!isOnline) showConnectionOverlay(item);
-    });
     
     video.addEventListener('timeupdate', () => {
         if (video.duration && video.currentTime >= 0) {
             const percent = (video.currentTime / video.duration) * 100;
             progress.style.width = Math.min(percent, 100) + '%';
+            
+            // Check if cached video is ending
+            const videoData = VIDEOS[index];
+            const isCached = cacheStatus.get(videoData.id);
+            if (isCached && !isOnline && video.duration <= CACHE_DURATION + 1) {
+                const timeLeft = video.duration - video.currentTime;
+                if (timeLeft <= 2 && timeLeft > 0) {
+                    showConnectionOverlay(item);
+                }
+            }
+        }
+    });
+    
+    video.addEventListener('ended', () => {
+        status.textContent = 'Ended';
+        const videoData = VIDEOS[index];
+        const isCached = cacheStatus.get(videoData.id);
+        if (isCached && !isOnline) {
+            showConnectionOverlay(item);
         }
     });
     
@@ -154,7 +231,11 @@ function setupEvents() {
         isOnline = true;
         updateNetworkStatus();
         hideAllConnectionOverlays();
-        if (currentVideo) loadVideoContent(currentVideo, VIDEOS[currentIndex]);
+        if (currentVideo) {
+            const videoData = VIDEOS[currentIndex];
+            loadVideoContent(currentVideo, videoData);
+        }
+        startCacheProcess(); // Resume caching when online
     });
     
     window.addEventListener('offline', () => {
@@ -205,6 +286,7 @@ async function loadVideo(index) {
     currentVideo = videos[index];
     const video = VIDEOS[index];
     
+    console.log(`Loading video: ${video.title}`);
     await loadVideoContent(currentVideo, video);
 }
 
@@ -213,101 +295,204 @@ async function loadVideoContent(videoEl, videoData) {
     showLoading(item, true);
     
     try {
-        const cachedUrl = await getCachedVideo(videoData.id);
+        const isCached = cacheStatus.get(videoData.id);
         
-        if (cachedUrl) {
-            videoEl.src = cachedUrl;
-            videoEl.load();
-            updateCacheDisplay(item, true);
-            try { await videoEl.play(); } catch (e) {}
+        if (isCached) {
+            // Play from cache
+            console.log(`Playing ${videoData.id} from cache`);
+            const cachedUrl = await getCachedVideo(videoData.id);
+            if (cachedUrl) {
+                videoEl.src = cachedUrl;
+                videoEl.load();
+                updateCacheDisplay(item, true);
+                
+                // Wait for video to be ready then auto-play
+                videoEl.addEventListener('canplay', () => {
+                    videoEl.play().catch(() => console.log('Auto-play blocked'));
+                }, { once: true });
+            } else {
+                throw new Error('Cache corrupted');
+            }
         } else if (isOnline) {
+            // Stream live and cache simultaneously
+            console.log(`Streaming ${videoData.id} live`);
             videoEl.src = videoData.src;
             videoEl.load();
             updateCacheDisplay(item, false);
-            try { await videoEl.play(); } catch (e) {}
+            
+            // Auto-play when ready
+            videoEl.addEventListener('canplay', () => {
+                videoEl.play().catch(() => console.log('Auto-play blocked'));
+            }, { once: true });
+            
+            // Start caching this video
             cacheVideo(videoData);
         } else {
+            // No cache and offline
             throw new Error('No cache and offline');
         }
     } catch (error) {
+        console.error(`Failed to load ${videoData.id}:`, error);
         showError('Failed to load', item);
     } finally {
         showLoading(item, false);
     }
 }
 
-async function cacheVideo(video) {
+async function startCacheProcess() {
     if (!isOnline) return;
     
+    console.log('Starting cache process...');
+    
+    // Cache videos that aren't cached yet
+    for (const video of VIDEOS) {
+        const isCached = cacheStatus.get(video.id);
+        if (!isCached) {
+            console.log(`Caching ${video.id}...`);
+            await cacheVideo(video);
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Delay between downloads
+        }
+    }
+}
+
+async function cacheVideo(video) {
+    if (!isOnline) return false;
+    
     try {
-        const segments = await createSegments(video.src, video.id);
-        if (segments.length === 0) return;
+        console.log(`Starting cache for ${video.id}`);
         
-        for (let i = 0; i < Math.min(segments.length, 5); i++) {
+        // Test video accessibility
+        const headResponse = await fetch(video.src, { method: 'HEAD', mode: 'cors' });
+        if (!headResponse.ok) {
+            console.error(`Cannot access ${video.id}: ${headResponse.status}`);
+            return false;
+        }
+        
+        const contentLength = parseInt(headResponse.headers.get('content-length') || '0');
+        console.log(`${video.id} size: ${contentLength} bytes`);
+        
+        // Calculate how much data we need for 15 seconds
+        // Estimate: for a typical video, 15 seconds ≈ 2-3MB
+        const estimatedSizeFor15Sec = Math.min(contentLength * 0.15, 3 * 1024 * 1024); // 15% or 3MB max
+        const segmentCount = 3; // Split into 3 segments
+        const segmentSize = Math.floor(estimatedSizeFor15Sec / segmentCount);
+        
+        const segments = [];
+        for (let i = 0; i < segmentCount; i++) {
+            const start = i * segmentSize;
+            const end = Math.min(start + segmentSize - 1, contentLength - 1);
+            segments.push({
+                start: start,
+                end: end,
+                range: `bytes=${start}-${end}`
+            });
+        }
+        
+        console.log(`Downloading ${segmentCount} segments for ${video.id}`);
+        
+        // Download and store segments
+        const storedSegments = [];
+        for (let i = 0; i < segments.length; i++) {
             const segment = segments[i];
+            
             try {
-                const response = await fetch(segment.url, {
-                    headers: segment.range ? { 'Range': segment.range } : {},
+                const response = await fetch(video.src, {
+                    headers: { 'Range': segment.range },
                     mode: 'cors'
                 });
                 
-                if (response.ok) {
+                if (response.ok || response.status === 206) { // 206 = Partial Content
                     const data = await response.arrayBuffer();
-                    if (data.byteLength > 1000) {
-                        await storeSegment(video.id, i, data);
-                    }
+                    console.log(`Segment ${i} downloaded: ${data.byteLength} bytes`);
+                    
+                    await storeSegment(video.id, i, data);
+                    storedSegments.push(i);
+                } else {
+                    console.warn(`Segment ${i} failed: ${response.status}`);
                 }
-            } catch (e) {
+            } catch (error) {
+                console.error(`Error downloading segment ${i}:`, error);
                 break;
             }
         }
-    } catch (e) {}
-}
-
-async function createSegments(url, videoId) {
-    try {
-        const response = await fetch(url, { method: 'HEAD', mode: 'cors' });
-        if (!response.ok) return [];
         
-        const length = parseInt(response.headers.get('content-length') || '0');
-        const segments = [];
-        
-        if (length > 0) {
-            const size = Math.floor(length / 8);
-            for (let i = 0; i < 5; i++) {
-                segments.push({
-                    url: url,
-                    range: `bytes=${i * size}-${Math.min((i + 1) * size - 1, length - 1)}`
-                });
-            }
+        if (storedSegments.length > 0) {
+            // Store metadata
+            await storeMetadata(video.id, {
+                cached: true,
+                segments: storedSegments.length,
+                duration: CACHE_DURATION,
+                timestamp: Date.now()
+            });
+            
+            cacheStatus.set(video.id, true);
+            updateVideoCache(video.id, true);
+            console.log(`✅ ${video.id} cached successfully (${storedSegments.length} segments)`);
+            return true;
         } else {
-            for (let i = 0; i < 5; i++) {
-                segments.push({ url: url });
-            }
+            console.error(`❌ Failed to cache ${video.id}`);
+            return false;
         }
         
-        return segments;
-    } catch (e) {
-        return [];
+    } catch (error) {
+        console.error(`Error caching ${video.id}:`, error);
+        return false;
     }
 }
 
 async function storeSegment(videoId, index, data) {
-    return new Promise((resolve) => {
-        if (!db) return resolve();
+    return new Promise((resolve, reject) => {
+        if (!db) return reject(new Error('DB not ready'));
         
         const tx = db.transaction(['segments'], 'readwrite');
         const store = tx.objectStore('segments');
         
-        store.put({
-            id: `${videoId}_${index}`,
+        const segmentData = {
+            id: `${videoId}_segment_${index}`,
             videoId: videoId,
             index: index,
-            data: data
-        });
+            data: data,
+            size: data.byteLength,
+            timestamp: Date.now()
+        };
         
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => resolve();
+        const request = store.put(segmentData);
+        
+        request.onsuccess = () => {
+            console.log(`Stored segment ${index} for ${videoId} (${data.byteLength} bytes)`);
+            resolve();
+        };
+        
+        request.onerror = () => {
+            console.error(`Failed to store segment ${index} for ${videoId}`);
+            reject(request.error);
+        };
+    });
+}
+
+async function storeMetadata(videoId, metadata) {
+    return new Promise((resolve, reject) => {
+        if (!db) return reject(new Error('DB not ready'));
+        
+        const tx = db.transaction(['metadata'], 'readwrite');
+        const store = tx.objectStore('metadata');
+        
+        const metaData = {
+            videoId: videoId,
+            ...metadata
+        };
+        
+        const request = store.put(metaData);
+        
+        request.onsuccess = () => {
+            console.log(`Metadata stored for ${videoId}`);
+            resolve();
+        };
+        
+        request.onerror = () => {
+            console.error(`Failed to store metadata for ${videoId}`);
+            reject(request.error);
+        };
     });
 }
 
@@ -322,10 +507,16 @@ async function getCachedVideo(videoId) {
         
         request.onsuccess = () => {
             const segments = request.result || [];
-            if (segments.length === 0) return resolve(null);
+            if (segments.length === 0) {
+                console.log(`No segments found for ${videoId}`);
+                return resolve(null);
+            }
             
+            // Sort segments by index
             segments.sort((a, b) => a.index - b.index);
+            console.log(`Found ${segments.length} segments for ${videoId}`);
             
+            // Combine segments
             const totalSize = segments.reduce((sum, seg) => sum + seg.data.byteLength, 0);
             const combined = new Uint8Array(totalSize);
             let offset = 0;
@@ -335,10 +526,26 @@ async function getCachedVideo(videoId) {
                 offset += segment.data.byteLength;
             }
             
-            resolve(URL.createObjectURL(new Blob([combined], { type: 'video/mp4' })));
+            console.log(`Created blob for ${videoId}: ${totalSize} bytes`);
+            const blob = new Blob([combined], { type: 'video/mp4' });
+            const url = URL.createObjectURL(blob);
+            resolve(url);
         };
         
-        request.onerror = () => resolve(null);
+        request.onerror = () => {
+            console.error(`Failed to get segments for ${videoId}`);
+            resolve(null);
+        };
+    });
+}
+
+function updateVideoCache(videoId, cached) {
+    const items = document.querySelectorAll('.video-item');
+    items.forEach(item => {
+        const video = item.querySelector('.video-player');
+        if (video.getAttribute('data-id') === videoId) {
+            updateCacheDisplay(item, cached);
+        }
     });
 }
 
@@ -368,7 +575,20 @@ function showLoading(item, show) {
 }
 
 function showConnectionOverlay(item) {
-    item.querySelector('.connection-overlay').classList.remove('hidden');
+    const overlay = item.querySelector('.connection-overlay');
+    overlay.classList.remove('hidden');
+    
+    // Auto-hide when connection is restored
+    const checkConnection = () => {
+        if (isOnline) {
+            hideAllConnectionOverlays();
+            const videoData = VIDEOS[currentIndex];
+            loadVideoContent(currentVideo, videoData);
+        } else {
+            setTimeout(checkConnection, 1000);
+        }
+    };
+    setTimeout(checkConnection, 1000);
 }
 
 function hideAllConnectionOverlays() {
@@ -397,7 +617,7 @@ function scrollToPrev() {
 function togglePlay(index) {
     const video = videos[index];
     if (video.paused) {
-        video.play().catch(() => {});
+        video.play().catch(() => console.log('Play failed'));
     } else {
         video.pause();
     }
@@ -417,22 +637,34 @@ async function clearCache() {
     return new Promise((resolve) => {
         if (!db) return resolve();
         
-        const tx = db.transaction(['segments'], 'readwrite');
-        const store = tx.objectStore('segments');
+        const tx = db.transaction(['segments', 'metadata'], 'readwrite');
         
-        store.clear();
+        const segmentStore = tx.objectStore('segments');
+        const metaStore = tx.objectStore('metadata');
+        
+        segmentStore.clear();
+        metaStore.clear();
         
         tx.oncomplete = () => {
-            document.querySelectorAll('.video-item').forEach(item => {
-                updateCacheDisplay(item, false);
+            // Reset cache status
+            cacheStatus.clear();
+            VIDEOS.forEach(video => {
+                cacheStatus.set(video.id, false);
+                updateVideoCache(video.id, false);
             });
+            
+            console.log('Cache cleared successfully');
             resolve();
         };
         
-        tx.onerror = () => resolve();
+        tx.onerror = () => {
+            console.error('Failed to clear cache');
+            resolve();
+        };
     });
 }
 
+// Global functions
 window.togglePlay = togglePlay;
 window.refresh = refresh;
 window.clearCache = clearCache;
