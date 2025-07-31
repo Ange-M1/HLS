@@ -60,21 +60,73 @@
             </button>
         </div>
 
-        <div class="mt-8 w-full">
-            <h2 class="text-2xl font-semibold text-white mb-4 text-center">Cached Videos (Initial Segments)</h2>
-            <div id="cachedVideosList" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <p class="text-gray-400 text-center text-sm">No initial segments cached yet.</p>
+        <!-- HLS Controls -->
+        <div class="mt-6 w-full">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+                <button
+                    id="preloadBtn"
+                    class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white font-bold rounded-lg shadow-lg transition duration-200"
+                >
+                    Preload Segments
+                </button>
+                <button
+                    id="analyzeBtn"
+                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg shadow-lg transition duration-200"
+                >
+                    Analyze Stream
+                </button>
+                <button
+                    id="downloadSegmentBtn"
+                    class="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-lg shadow-lg transition duration-200"
+                >
+                    Download Segment
+                </button>
             </div>
-            <button
-                id="clearCacheButton"
-                class="mt-4 w-full px-4 py-2 bg-red-600 hover:bg-red-700 active:bg-red-800 text-white font-bold rounded-full shadow-lg transition duration-200 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-75"
-            >
-                Clear Cache
-            </button>
+        </div>
+
+        <!-- Stream Information -->
+        <div class="mt-6 w-full bg-gray-700 rounded-lg p-4">
+            <h3 class="text-lg font-semibold text-white mb-3">Stream Information</h3>
+            <div id="streamInfo" class="text-sm text-gray-300 space-y-1">
+                <p>Status: <span id="hlsStatus" class="text-yellow-400">Not loaded</span></p>
+                <p>Quality: <span id="currentQuality" class="text-blue-400">-</span></p>
+                <p>Segments: <span id="segmentCount" class="text-green-400">0</span></p>
+                <p>Current Segment: <span id="currentSegment" class="text-purple-400">-</span></p>
+            </div>
+        </div>
+
+        <!-- Segment Management -->
+        <div class="mt-6 w-full">
+            <h2 class="text-2xl font-semibold text-white mb-4 text-center">HLS Segments</h2>
+            <div class="mb-4 flex flex-wrap gap-2 justify-center">
+                <button id="showAllSegments" class="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white text-sm rounded transition">All</button>
+                <button id="showCachedSegments" class="px-3 py-1 bg-green-600 hover:bg-green-700 text-white text-sm rounded transition">Cached</button>
+                <button id="showPendingSegments" class="px-3 py-1 bg-yellow-600 hover:bg-yellow-700 text-white text-sm rounded transition">Pending</button>
+            </div>
+            <div id="segmentsList" class="max-h-64 overflow-y-auto bg-gray-700 rounded-lg p-4">
+                <p class="text-gray-400 text-center text-sm">No segments loaded yet.</p>
+            </div>
+            <div class="mt-4 flex gap-2">
+                <button
+                    id="clearCacheButton"
+                    class="flex-1 px-4 py-2 bg-red-600 hover:bg-red-700 active:bg-red-800 text-white font-bold rounded-lg shadow-lg transition duration-200 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-75"
+                >
+                    Clear Cache
+                </button>
+                <button
+                    id="refreshSegments"
+                    class="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg shadow-lg transition duration-200"
+                >
+                    Refresh
+                </button>
+            </div>
         </div>
     </div>
 
+    <!-- Include required libraries -->
+    <script src="https://unpkg.com/idb@7/build/umd.js"></script>
+    <script src="hls.min.js"></script>
     <!-- Link to external JavaScript file -->
-    <script src="script.js"></script>
+    <script src="main.js"></script>
 </body>
 </html>
