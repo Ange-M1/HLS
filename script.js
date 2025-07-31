@@ -11,25 +11,49 @@ let cachedSegments = new Set();
 let currentSegmentIndex = 0;
 let totalSegments = 0;
 
-// DOM Elements
-const networkStatusElem = document.getElementById('networkStatus');
-const networkMessageElem = document.getElementById('networkMessage');
-const videoTitleElem = document.getElementById('videoTitle');
-const videoElement = document.getElementById('videoElement');
-const videoLoadingOverlay = document.getElementById('videoLoadingOverlay');
-const onlineSegmentSpinner = document.getElementById('onlineSegmentSpinner');
-const videoMessageElem = document.getElementById('videoMessage');
-const noVideoSourceElem = document.getElementById('noVideoSource');
-const cachedSegmentsListElem = document.getElementById('cachedSegmentsList');
-const clearCacheButton = document.getElementById('clearCacheButton');
-const downloadManifestButton = document.getElementById('downloadManifestButton');
-const loadVideoButton = document.getElementById('loadVideoButton');
-const videoUrlInput = document.getElementById('videoUrlInput');
-const segmentInfo = document.getElementById('segmentInfo');
-const currentSegmentElem = document.getElementById('currentSegment');
-const playbackModeElem = document.getElementById('playbackMode');
-const cacheStatusElem = document.getElementById('cacheStatus');
-const debugInfo = document.getElementById('debugInfo');
+// DOM Elements - will be initialized after DOM is loaded
+let networkStatusElem;
+let networkMessageElem;
+let videoTitleElem;
+let videoElement;
+let videoLoadingOverlay;
+let onlineSegmentSpinner;
+let videoMessageElem;
+let noVideoSourceElem;
+let cachedSegmentsListElem;
+let clearCacheButton;
+let downloadManifestButton;
+let loadVideoButton;
+let videoUrlInput;
+let segmentInfo;
+let currentSegmentElem;
+let playbackModeElem;
+let cacheStatusElem;
+let debugInfo;
+
+/**
+ * Initialize DOM element references
+ */
+function initializeDOMElements() {
+    networkStatusElem = document.getElementById('networkStatus');
+    networkMessageElem = document.getElementById('networkMessage');
+    videoTitleElem = document.getElementById('videoTitle');
+    videoElement = document.getElementById('videoElement');
+    videoLoadingOverlay = document.getElementById('videoLoadingOverlay');
+    onlineSegmentSpinner = document.getElementById('onlineSegmentSpinner');
+    videoMessageElem = document.getElementById('videoMessage');
+    noVideoSourceElem = document.getElementById('noVideoSource');
+    cachedSegmentsListElem = document.getElementById('cachedSegmentsList');
+    clearCacheButton = document.getElementById('clearCacheButton');
+    downloadManifestButton = document.getElementById('downloadManifestButton');
+    loadVideoButton = document.getElementById('loadVideoButton');
+    videoUrlInput = document.getElementById('videoUrlInput');
+    segmentInfo = document.getElementById('segmentInfo');
+    currentSegmentElem = document.getElementById('currentSegment');
+    playbackModeElem = document.getElementById('playbackMode');
+    cacheStatusElem = document.getElementById('cacheStatus');
+    debugInfo = document.getElementById('debugInfo');
+}
 
 // --- IndexedDB Functions ---
 
@@ -369,9 +393,15 @@ async function loadVideoStream(streamUrl) {
         updateDebugInfo(`Loading stream: ${streamUrl}`);
         
         // Show loading overlay
-        videoLoadingOverlay.classList.remove('hidden');
-        noVideoSourceElem.classList.add('hidden');
-        videoElement.classList.remove('hidden');
+        if (videoLoadingOverlay) {
+            videoLoadingOverlay.classList.remove('hidden');
+        }
+        if (noVideoSourceElem) {
+            noVideoSourceElem.classList.add('hidden');
+        }
+        if (videoElement) {
+            videoElement.classList.remove('hidden');
+        }
         
         // Download and parse manifest
         const { content: manifestContent, segments } = await downloadManifest(streamUrl);
@@ -408,12 +438,14 @@ async function loadVideoStream(streamUrl) {
             });
             
             hls.loadSource(manifestUrl);
-            hls.attachMedia(videoElement);
+            if (videoElement) {
+                hls.attachMedia(videoElement);
+            }
             
             // Set up HLS event listeners
             setupHLSEventListeners();
             
-        } else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+        } else if (videoElement && videoElement.canPlayType('application/vnd.apple.mpegurl')) {
             // Native HLS support (Safari)
             videoElement.src = manifestUrl;
             videoElement.addEventListener('loadedmetadata', () => {
@@ -424,20 +456,32 @@ async function loadVideoStream(streamUrl) {
         }
         
         // Update UI
-        videoTitleElem.textContent = `Stream: ${new URL(streamUrl).hostname}`;
-        videoMessageElem.textContent = 'Stream loaded successfully. First 3 segments cached for offline playback.';
-        segmentInfo.classList.remove('hidden');
+        if (videoTitleElem) {
+            videoTitleElem.textContent = `Stream: ${new URL(streamUrl).hostname}`;
+        }
+        if (videoMessageElem) {
+            videoMessageElem.textContent = 'Stream loaded successfully. First 3 segments cached for offline playback.';
+        }
+        if (segmentInfo) {
+            segmentInfo.classList.remove('hidden');
+        }
         updateSegmentInfo();
         
         // Hide loading overlay
-        videoLoadingOverlay.classList.add('hidden');
+        if (videoLoadingOverlay) {
+            videoLoadingOverlay.classList.add('hidden');
+        }
         
         updateDebugInfo('Stream loaded successfully');
         
     } catch (error) {
         console.error('Error loading video stream:', error);
-        videoMessageElem.textContent = `Error loading stream: ${error.message}`;
-        videoLoadingOverlay.classList.add('hidden');
+        if (videoMessageElem) {
+            videoMessageElem.textContent = `Error loading stream: ${error.message}`;
+        }
+        if (videoLoadingOverlay) {
+            videoLoadingOverlay.classList.add('hidden');
+        }
         updateDebugInfo(`Error: ${error.message}`);
     }
 }
@@ -501,6 +545,7 @@ function setupHLSEventListeners() {
  * Shows the spinner for online segments.
  */
 function showOnlineSegmentSpinner() {
+    if (!onlineSegmentSpinner) return;
     onlineSegmentSpinner.classList.remove('hidden');
 }
 
@@ -508,6 +553,7 @@ function showOnlineSegmentSpinner() {
  * Hides the spinner for online segments.
  */
 function hideOnlineSegmentSpinner() {
+    if (!onlineSegmentSpinner) return;
     onlineSegmentSpinner.classList.add('hidden');
 }
 
@@ -515,6 +561,8 @@ function hideOnlineSegmentSpinner() {
  * Updates the segment information display.
  */
 function updateSegmentInfo() {
+    if (!currentSegmentElem || !playbackModeElem || !cacheStatusElem) return;
+    
     currentSegmentElem.textContent = `Segment: ${currentSegmentIndex}/${totalSegments}`;
     playbackModeElem.textContent = `Mode: ${currentSegmentIndex < 3 ? 'Offline' : 'Online'}`;
     cacheStatusElem.textContent = `Cache: ${cachedSegments.size} segments`;
@@ -525,6 +573,8 @@ function updateSegmentInfo() {
  * @param {string} message - The debug message to add.
  */
 function updateDebugInfo(message) {
+    if (!debugInfo) return;
+    
     const timestamp = new Date().toLocaleTimeString();
     const debugLine = `[${timestamp}] ${message}`;
     
@@ -546,6 +596,8 @@ function updateDebugInfo(message) {
  * Updates the network status display.
  */
 function updateNetworkStatusDisplay() {
+    if (!networkStatusElem || !networkMessageElem) return;
+    
     networkStatusElem.textContent = `Network Status: ${isOnline ? 'Online' : 'Offline'}`;
     networkStatusElem.classList.toggle('text-green-400', isOnline);
     networkStatusElem.classList.toggle('text-red-400', !isOnline);
@@ -561,6 +613,8 @@ function updateNetworkStatusDisplay() {
  * Updates the cached segments list display.
  */
 async function updateCachedSegmentsList() {
+    if (!cachedSegmentsListElem) return;
+    
     cachedSegmentsListElem.innerHTML = '';
     const cachedIds = await getAllCachedSegmentIds();
 
@@ -590,11 +644,15 @@ async function clearCache() {
         cachedSegments.clear();
         updateCachedSegmentsList();
         updateSegmentInfo();
-        networkMessageElem.textContent = 'Cache cleared successfully!';
+        if (networkMessageElem) {
+            networkMessageElem.textContent = 'Cache cleared successfully!';
+        }
         updateDebugInfo('Cache cleared');
     } catch (error) {
         console.error('Error clearing cache:', error);
-        networkMessageElem.textContent = 'Error clearing cache.';
+        if (networkMessageElem) {
+            networkMessageElem.textContent = 'Error clearing cache.';
+        }
         updateDebugInfo(`Error clearing cache: ${error.message}`);
     }
 }
@@ -658,6 +716,9 @@ async function registerServiceWorker() {
 
 document.addEventListener('DOMContentLoaded', async () => {
     try {
+        // Initialize DOM elements
+        initializeDOMElements();
+        
         // Register service worker
         await registerServiceWorker();
         
@@ -667,23 +728,31 @@ document.addEventListener('DOMContentLoaded', async () => {
         await updateCachedSegmentsList();
         
         // Add event listeners
-        loadVideoButton.addEventListener('click', () => {
-            const url = videoUrlInput.value.trim();
-            if (url) {
-                loadVideoStream(url);
-            } else {
-                alert('Please enter a valid HLS stream URL.');
-            }
-        });
+        if (loadVideoButton) {
+            loadVideoButton.addEventListener('click', () => {
+                const url = videoUrlInput ? videoUrlInput.value.trim() : '';
+                if (url) {
+                    loadVideoStream(url);
+                } else {
+                    alert('Please enter a valid HLS stream URL.');
+                }
+            });
+        }
         
-        videoUrlInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') {
-                loadVideoButton.click();
-            }
-        });
+        if (videoUrlInput) {
+            videoUrlInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter' && loadVideoButton) {
+                    loadVideoButton.click();
+                }
+            });
+        }
         
-        clearCacheButton.addEventListener('click', clearCache);
-        downloadManifestButton.addEventListener('click', downloadManifestForInspection);
+        if (clearCacheButton) {
+            clearCacheButton.addEventListener('click', clearCache);
+        }
+        if (downloadManifestButton) {
+            downloadManifestButton.addEventListener('click', downloadManifestForInspection);
+        }
         
         // Network status listeners
         window.addEventListener('online', () => {
@@ -699,14 +768,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
         
         // Video element listeners
-        videoElement.addEventListener('ended', () => {
-            updateDebugInfo('Video playback ended');
-        });
-        
-        videoElement.addEventListener('error', (e) => {
-            console.error('Video error:', e);
-            updateDebugInfo(`Video error: ${e.target.error ? e.target.error.message : 'Unknown error'}`);
-        });
+        if (videoElement) {
+            videoElement.addEventListener('ended', () => {
+                updateDebugInfo('Video playback ended');
+            });
+            
+            videoElement.addEventListener('error', (e) => {
+                console.error('Video error:', e);
+                updateDebugInfo(`Video error: ${e.target.error ? e.target.error.message : 'Unknown error'}`);
+            });
+        }
         
         updateDebugInfo('Application initialized successfully');
         
