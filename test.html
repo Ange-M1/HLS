@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube-like Video Player - Test Page</title>
+    <!-- Custom CSS for styling -->
+    <!-- HLS.js for HLS video streaming -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <!-- Link to external CSS file -->
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="min-h-screen bg-gradient-to-br from-gray-900 to-black flex flex-col items-center justify-center p-4 font-sans text-gray-100">
+
+    <div class="bg-gray-800 rounded-xl shadow-2xl p-6 md:p-8 w-full max-w-4xl flex flex-col items-center border border-gray-700">
+        <h1 class="text-3xl md:text-4xl font-extrabold text-white mb-6 text-center">
+            YouTube-like Video Player - Test
+        </h1>
+
+        <div class="w-full mb-6 text-center">
+            <p id="networkStatus" class="text-lg font-medium text-green-400">
+                Network Status: Online
+            </p>
+            <p id="networkMessage" class="text-sm text-gray-400 mt-2"></p>
+        </div>
+
+        <!-- Sample Stream URLs -->
+        <div class="w-full mb-6">
+            <h3 class="text-lg font-semibold text-white mb-3 text-center">Sample HLS Streams</h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <button
+                    onclick="loadSampleStream('https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8')"
+                    class="p-4 bg-blue-600 hover:bg-blue-700 rounded-lg text-white font-medium transition duration-200"
+                >
+                    Big Buck Bunny (Test Stream)
+                </button>
+                <button
+                    onclick="loadSampleStream('https://cph-p2p-msl.akamaized.net/hls/live/2000341/test/master.m3u8')"
+                    class="p-4 bg-green-600 hover:bg-green-700 rounded-lg text-white font-medium transition duration-200"
+                >
+                    Akamai Test Stream
+                </button>
+            </div>
+        </div>
+
+        <!-- Video URL Input -->
+        <div class="w-full mb-6">
+            <div class="flex flex-col md:flex-row gap-4">
+                <input 
+                    type="url" 
+                    id="videoUrlInput" 
+                    placeholder="Enter HLS stream URL (e.g., https://example.com/stream.m3u8)"
+                    class="flex-1 px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                <button
+                    id="loadVideoButton"
+                    class="px-6 py-3 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold rounded-lg shadow-lg transform transition duration-200 ease-in-out hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-75"
+                >
+                    Load Stream
+                </button>
+            </div>
+        </div>
+
+        <!-- Video Player Container -->
+        <div id="videoPlayerContainer" class="flex flex-col items-center justify-center bg-gray-900 rounded-lg shadow-lg p-4 w-full h-full max-w-3xl mx-auto">
+            <h3 id="videoTitle" class="text-xl font-semibold text-white mb-4 text-center">Click a sample stream or enter a URL above</h3>
+            <div class="relative w-full aspect-video bg-black rounded-md overflow-hidden">
+                <!-- Loading Overlay -->
+                <div id="videoLoadingOverlay" class="absolute inset-0 flex items-center justify-center bg-black bg-opacity-75 text-white text-lg z-10 hidden">
+                    <div class="flex flex-col items-center">
+                        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-white mb-4"></div>
+                        <p>Loading video...</p>
+                    </div>
+                </div>
+                
+                <!-- Spinner for Online Segments -->
+                <div id="onlineSegmentSpinner" class="absolute inset-0 flex items-center justify-center bg-black bg-opacity-75 text-white text-lg z-10 hidden">
+                    <div class="flex flex-col items-center">
+                        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mb-4"></div>
+                        <p class="text-center">
+                            <span class="text-blue-400 font-semibold">Online segments loading...</span><br>
+                            <span class="text-sm text-gray-400">Requires internet connection</span>
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Video Element -->
+                <video
+                    id="videoElement"
+                    controls
+                    autoplay
+                    playsinline
+                    class="w-full h-full object-contain rounded-md"
+                >
+                    Your browser does not support the video tag.
+                </video>
+                
+                <!-- No Video Source -->
+                <div id="noVideoSource" class="absolute inset-0 flex items-center justify-center bg-gray-800 text-gray-400 text-lg rounded-md">
+                    <div class="text-center">
+                        <p class="mb-2">No video source available.</p>
+                        <p class="text-sm">Click a sample stream or enter a valid HLS stream URL above.</p>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Video Info -->
+            <div class="mt-4 w-full">
+                <p id="videoMessage" class="text-gray-300 text-sm text-center"></p>
+                <div id="segmentInfo" class="mt-2 text-xs text-gray-400 text-center hidden">
+                    <span id="currentSegment" class="mr-4">Segment: 0/0</span>
+                    <span id="playbackMode" class="mr-4">Mode: Online</span>
+                    <span id="cacheStatus">Cache: Empty</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Control Buttons -->
+        <div class="flex justify-center space-x-4 mt-8 w-full">
+            <button
+                id="clearCacheButton"
+                class="px-6 py-3 bg-red-600 hover:bg-red-700 active:bg-red-800 text-white font-bold rounded-lg shadow-lg transform transition duration-200 ease-in-out hover:scale-105 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-75"
+            >
+                Clear Cache
+            </button>
+            <button
+                id="downloadManifestButton"
+                class="px-6 py-3 bg-green-600 hover:bg-green-700 active:bg-green-800 text-white font-bold rounded-lg shadow-lg transform transition duration-200 ease-in-out hover:scale-105 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-75"
+            >
+                Download Manifest
+            </button>
+        </div>
+
+        <!-- Cached Segments Info -->
+        <div class="mt-8 w-full">
+            <h2 class="text-2xl font-semibold text-white mb-4 text-center">Cached Segments</h2>
+            <div id="cachedSegmentsList" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <p class="text-gray-400 text-center text-sm">No segments cached yet.</p>
+            </div>
+        </div>
+
+        <!-- Debug Info -->
+        <div class="mt-8 w-full">
+            <h3 class="text-lg font-semibold text-white mb-2 text-center">Debug Information</h3>
+            <div id="debugInfo" class="bg-gray-700 p-4 rounded-lg text-xs text-gray-300 font-mono">
+                <p>Ready to load HLS stream...</p>
+            </div>
+        </div>
+
+        <!-- Instructions -->
+        <div class="mt-8 w-full">
+            <h3 class="text-lg font-semibold text-white mb-4 text-center">How to Test Offline Functionality</h3>
+            <div class="bg-gray-700 p-4 rounded-lg text-sm text-gray-300">
+                <ol class="list-decimal list-inside space-y-2">
+                    <li>Load a stream using one of the sample buttons above</li>
+                    <li>Wait for the first 3 segments to be cached (check debug info)</li>
+                    <li>Disconnect your internet connection</li>
+                    <li>Refresh the page - you should still be able to watch the first 15 seconds</li>
+                    <li>Reconnect to the internet to continue streaming</li>
+                </ol>
+            </div>
+        </div>
+    </div>
+
+    <!-- Link to external JavaScript file -->
+    <script src="script.js"></script>
+    
+    <script>
+        // Function to load sample streams
+        function loadSampleStream(url) {
+            document.getElementById('videoUrlInput').value = url;
+            document.getElementById('loadVideoButton').click();
+        }
+    </script>
+</body>
+</html>
