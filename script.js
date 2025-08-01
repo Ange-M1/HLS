@@ -67,12 +67,15 @@ function openDatabase() {
 
         request.onupgradeneeded = (event) => {
             const db = event.target.result;
-            // Create object stores for video segments and manifests
+            // Create object stores for video segments, manifests, and segment mapping
             if (!db.objectStoreNames.contains('videoSegments')) {
                 db.createObjectStore('videoSegments', { keyPath: 'id' });
             }
             if (!db.objectStoreNames.contains('manifests')) {
                 db.createObjectStore('manifests', { keyPath: 'url' });
+            }
+            if (!db.objectStoreNames.contains('segmentMapping')) {
+                db.createObjectStore('segmentMapping', { keyPath: 'url' });
             }
             console.log('IndexedDB object stores created/upgraded.');
         };
@@ -177,6 +180,33 @@ function storeManifestInIndexedDB(url, manifestContent) {
 }
 
 /**
+ * Stores a segment mapping in IndexedDB.
+ * @param {string} segmentUrl - The segment URL.
+ * @param {string} segmentId - The segment ID.
+ * @returns {Promise<void>}
+ */
+function storeSegmentMappingInIndexedDB(segmentUrl, segmentId) {
+    return new Promise((resolve, reject) => {
+        if (!db) {
+            return reject('IndexedDB not initialized.');
+        }
+        const transaction = db.transaction(['segmentMapping'], 'readwrite');
+        const store = transaction.objectStore('segmentMapping');
+        const request = store.put({ url: segmentUrl, segmentId: segmentId, timestamp: Date.now() });
+
+        request.onsuccess = () => {
+            console.log(`Segment mapping for ${segmentUrl} stored in IndexedDB.`);
+            resolve();
+        };
+
+        request.onerror = (event) => {
+            console.error(`Error storing segment mapping for ${segmentUrl}:`, event.target.error);
+            reject(event.target.error);
+        };
+    });
+}
+
+/**
  * Retrieves a manifest from IndexedDB.
  * @param {string} url - The manifest URL.
  * @returns {Promise<string|null>} A promise that resolves with the manifest content or null if not found.
@@ -217,12 +247,14 @@ function clearAllDataFromIndexedDB() {
             return reject('IndexedDB not initialized.');
         }
         
-        const transaction = db.transaction(['videoSegments', 'manifests'], 'readwrite');
+        const transaction = db.transaction(['videoSegments', 'manifests', 'segmentMapping'], 'readwrite');
         const segmentsStore = transaction.objectStore('videoSegments');
         const manifestsStore = transaction.objectStore('manifests');
+        const mappingStore = transaction.objectStore('segmentMapping');
         
         const segmentsRequest = segmentsStore.clear();
         const manifestsRequest = manifestsStore.clear();
+        const mappingRequest = mappingStore.clear();
 
         transaction.oncomplete = () => {
             console.log('All data cleared from IndexedDB.');
@@ -322,35 +354,7 @@ async function downloadSegment(segmentUrl) {
     }
 }
 
-/**
- * Creates a modified manifest with local URLs for the first 3 segments.
- * @param {string} originalManifest - The original manifest content.
- * @param {string} baseUrl - The base URL for the manifest.
- * @param {string[]} segments - Array of segment URLs.
- * @returns {string} The modified manifest content.
- */
-function createModifiedManifest(originalManifest, baseUrl, segments) {
-    let modifiedManifest = originalManifest;
-    
-    // Replace the first 3 segments with local URLs
-    for (let i = 0; i < Math.min(3, segments.length); i++) {
-        const originalSegment = segments[i];
-        const localSegment = `http://localhost/playlist.m3u8/segment${i + 1}.ts`;
-        
-        // Create absolute URL if segment is relative
-        const absoluteSegmentUrl = originalSegment.startsWith('http') 
-            ? originalSegment 
-            : new URL(originalSegment, baseUrl).href;
-        
-        modifiedManifest = modifiedManifest.replace(originalSegment, localSegment);
-        
-        // Store the mapping for later use
-        window.segmentMapping = window.segmentMapping || {};
-        window.segmentMapping[localSegment] = absoluteSegmentUrl;
-    }
-    
-    return modifiedManifest;
-}
+
 
 /**
  * Downloads and caches the first 3 segments.
@@ -417,12 +421,22 @@ async function loadVideoStream(streamUrl) {
         const baseUrl = new URL(streamUrl).origin;
         await downloadAndCacheFirstSegments(segments, baseUrl);
         
-        // Create modified manifest
-        modifiedManifest = createModifiedManifest(manifestContent, baseUrl, segments);
+        // Store the original manifest and segment mapping for Service Worker
+        modifiedManifest = manifestContent;
         
-        // Create blob URL for modified manifest
-        const manifestBlob = new Blob([modifiedManifest], { type: 'application/vnd.apple.mpegurl' });
-        const manifestUrl = URL.createObjectURL(manifestBlob);
+        // Create mapping for first 3 segments and store in IndexedDB
+        for (let i = 0; i < Math.min(3, segments.length); i++) {
+            const originalSegment = segments[i];
+            const absoluteSegmentUrl = originalSegment.startsWith('http') 
+                ? originalSegment 
+                : new URL(originalSegment, baseUrl).href;
+            
+            // Store the mapping in IndexedDB
+            await storeSegmentMappingInIndexedDB(absoluteSegmentUrl, `segment${i + 1}`);
+        }
+        
+        // Use the original manifest URL directly
+        const manifestUrl = streamUrl;
         
         // Initialize HLS.js
         if (Hls.isSupported()) {
