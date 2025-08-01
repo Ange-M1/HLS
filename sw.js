@@ -31,60 +31,76 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
     
-    // Check if this is a request for a video segment (.ts files)
-    if (url.pathname.includes('.ts') || url.pathname.includes('.m4s')) {
-        console.log('Intercepting segment request:', url.href);
-        event.respondWith(handleSegmentRequest(event.request));
+    // Check if this is a request for HLS files (.m3u8, .ts, .m4s)
+    if (url.pathname.includes('.m3u8') || url.pathname.includes('.ts') || url.pathname.includes('.m4s')) {
+        console.log('Intercepting HLS request:', url.href);
+        event.respondWith(handleHLSRequest(event.request));
     }
 });
 
 /**
- * Handles requests for segments by serving them from IndexedDB if cached, otherwise fetching from network
+ * Handles requests for HLS files (manifests and segments) by serving cached segments from IndexedDB or fetching from network
  * @param {Request} request - The fetch request
- * @returns {Promise<Response>} The response with segment data
+ * @returns {Promise<Response>} The response with HLS data
  */
-async function handleSegmentRequest(request) {
+async function handleHLSRequest(request) {
     try {
         const url = new URL(request.url);
-        const segmentUrl = url.href;
+        const requestUrl = url.href;
         
-        console.log('Looking for segment in IndexedDB:', segmentUrl);
-        
-        // Check if we have a mapping for this segment
-        const segmentId = await getSegmentIdForUrl(segmentUrl);
-        
-        if (segmentId) {
-            // Get segment from IndexedDB
-            const segmentData = await getSegmentFromIndexedDB(segmentId);
-            
-            if (segmentData) {
-                console.log('Serving segment from IndexedDB:', segmentId);
-                return new Response(segmentData, {
-                    status: 200,
-                    statusText: 'OK',
-                    headers: {
-                        'Content-Type': 'video/mp2t',
-                        'Content-Length': segmentData.byteLength.toString(),
-                        'Cache-Control': 'public, max-age=31536000',
-                        'Access-Control-Allow-Origin': '*'
-                    }
-                });
-            }
+        // Check if this is a manifest request (.m3u8)
+        if (url.pathname.includes('.m3u8')) {
+            console.log('Handling manifest request:', requestUrl);
+            // Always fetch manifests from network
+            const response = await fetch(request);
+            return response;
         }
         
-        // If not in cache, fetch from network
-        console.log('Fetching segment from network:', segmentUrl);
+        // Check if this is a segment request (.ts or .m4s)
+        if (url.pathname.includes('.ts') || url.pathname.includes('.m4s')) {
+            console.log('Looking for segment in IndexedDB:', requestUrl);
+            
+            // Check if we have a mapping for this segment
+            const segmentId = await getSegmentIdForUrl(requestUrl);
+            
+            if (segmentId) {
+                // Get segment from IndexedDB
+                const segmentData = await getSegmentFromIndexedDB(segmentId);
+                
+                if (segmentData) {
+                    console.log('Serving segment from IndexedDB:', segmentId);
+                    return new Response(segmentData, {
+                        status: 200,
+                        statusText: 'OK',
+                        headers: {
+                            'Content-Type': 'video/mp2t',
+                            'Content-Length': segmentData.byteLength.toString(),
+                            'Cache-Control': 'public, max-age=31536000',
+                            'Access-Control-Allow-Origin': '*'
+                        }
+                    });
+                }
+            }
+            
+            // If not in cache, fetch from network
+            console.log('Fetching segment from network:', requestUrl);
+            const response = await fetch(request);
+            return response;
+        }
+        
+        // For any other HLS-related files, fetch from network
+        console.log('Fetching from network:', requestUrl);
         const response = await fetch(request);
         return response;
         
     } catch (error) {
-        console.error('Error handling segment request:', error);
+        console.error('Error handling HLS request:', error);
         // Fallback to network request
         try {
             return await fetch(request);
         } catch (fetchError) {
             console.error('Network fetch also failed:', fetchError);
-            return new Response('Segment not available', {
+            return new Response('HLS file not available', {
                 status: 404,
                 statusText: 'Not Found'
             });

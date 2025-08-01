@@ -446,9 +446,13 @@ async function loadVideoStream(streamUrl) {
             
             hls = new Hls({
                 debug: false,
-                enableWorker: true,
+                enableWorker: false, // Disable worker to avoid blob URL issues
                 lowLatencyMode: true,
-                backBufferLength: 90
+                backBufferLength: 90,
+                xhrSetup: function(xhr, url) {
+                    // Ensure we're using the original URL, not blob URLs
+                    console.log('HLS.js requesting:', url);
+                }
             });
             
             hls.loadSource(manifestUrl);
